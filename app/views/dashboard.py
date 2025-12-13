@@ -30,7 +30,7 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# FX RATE
+# FX RATE (USD → INR)
 # -------------------------------------------------
 @st.cache_data(ttl=6 * 60 * 60)
 def get_usd_inr_rate():
@@ -41,6 +41,7 @@ def get_usd_inr_rate():
         )
         return float(r.json()["rates"]["INR"])
     except Exception:
+        st.warning("⚠️ FX API unavailable. Using fallback INR rate.")
         return 83.0
 
 
@@ -68,15 +69,39 @@ def load_ensemble_forecast():
 
 
 # -------------------------------------------------
-# RECURSIVE EXTENSION (LONG HORIZON)
+# SAFE RECURSIVE EXTENSION (LONG HORIZON)
 # -------------------------------------------------
-def recursive_forecast(base_preds, horizon_days):
+def recursive_forecast(base_preds, horizon_days, fallback_value):
+    """
+    Production-safe recursive forecast.
+
+    - If ensemble predictions are empty:
+        → fallback to last known gold price
+    - If only few predictions exist:
+        → zero/low drift extension
+    """
+
+    # ---- Case 1: No ensemble data ----
+    if base_preds is None or len(base_preds) == 0:
+        st.warning(
+            "⚠️ Ensemble forecast not available yet. "
+            "Using last known gold price as flat forecast."
+        )
+        return [fallback_value] * horizon_days
+
     preds = list(base_preds)
 
+    # ---- Case 2: Enough predictions ----
     if horizon_days <= len(preds):
         return preds[:horizon_days]
 
-    drift = np.mean(np.diff(preds[-14:]))
+    # ---- Case 3: Extend recursively ----
+    if len(preds) < 2:
+        drift = 0.0
+    else:
+        drift = np.mean(np.diff(preds[-min(14, len(preds)):]))
+        if np.isnan(drift):
+            drift = 0.0
 
     for _ in range(horizon_days - len(preds)):
         preds.append(preds[-1] + drift)
@@ -114,8 +139,14 @@ with st.spinner("Loading data…"):
     ensemble = load_ensemble_forecast()
     usd_inr = get_usd_inr_rate()
 
+# Convert to INR
 actuals["GOLD_CLOSE"] *= usd_inr
-ensemble["ENSEMBLE_PRED"] *= usd_inr
+
+if "ENSEMBLE_PRED" in ensemble.columns:
+    ensemble["ENSEMBLE_PRED"] *= usd_inr
+else:
+    ensemble["ENSEMBLE_PRED"] = []
+
 
 # -------------------------------------------------
 # HORIZON
@@ -134,12 +165,14 @@ else:
         min(years * 365 + months * 30 + days, 365 * MAX_YEARS)
     )
 
+
 # -------------------------------------------------
 # FORECAST
 # -------------------------------------------------
 future_preds = recursive_forecast(
     ensemble["ENSEMBLE_PRED"].tolist(),
-    horizon_days
+    horizon_days,
+    fallback_value=actuals["GOLD_CLOSE"].iloc[-1]
 )
 
 future_dates = pd.date_range(
@@ -152,6 +185,7 @@ forecast_df = pd.DataFrame(
     index=future_dates
 )
 
+
 # -------------------------------------------------
 # PLOT
 # -------------------------------------------------
@@ -160,28 +194,33 @@ fig = go.Figure()
 fig.add_trace(go.Scatter(
     x=actuals.index[-730:],
     y=actuals["GOLD_CLOSE"].iloc[-730:],
-    name="Historical"
+    name="Historical",
+    line=dict(color="royalblue")
 ))
 
 fig.add_trace(go.Scatter(
     x=forecast_df.index,
     y=forecast_df["Prediction (₹)"],
-    name="Ensemble Forecast"
+    name="Ensemble Forecast",
+    line=dict(color="orange")
 ))
 
 fig.update_layout(
     height=550,
-    template="plotly_dark"
+    template="plotly_dark",
+    xaxis_title="Date",
+    yaxis_title="Gold Price (₹)"
 )
 
 st.plotly_chart(fig, use_container_width=True)
+
 
 # -------------------------------------------------
 # OUTPUT
 # -------------------------------------------------
 st.metric(
     "Next Day Prediction (₹)",
-    f"₹ {forecast_df.iloc[0,0]:,.2f}"
+    f"₹ {forecast_df.iloc[0, 0]:,.2f}"
 )
 
 st.line_chart(forecast_df["Prediction (₹)"])
@@ -189,7 +228,11 @@ st.line_chart(forecast_df["Prediction (₹)"])
 st.download_button(
     "Download Forecast CSV",
     forecast_df.to_csv().encode(),
-    "gold_forecast.csv"
+    "gold_forecast.csv",
+    "text/csv"
 )
 
-st.caption("Dashboard is read-only. Models run outside UI.")
+st.caption(
+    "Dashboard is read-only. "
+    "Models (Chronos T5 + NHITS) run outside the UI via scheduled pipelines."
+)
