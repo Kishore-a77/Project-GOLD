@@ -1,0 +1,12 @@
+streamlit
+plotly
+pandas
+numpy
+scikit-learn
+torch
+u8darts[torch]
+chronos-forecast
+snowflake-connector-python
+snowflake-snowpark-python
+python-dotenv
+requests
