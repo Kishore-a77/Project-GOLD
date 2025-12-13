@@ -10,7 +10,7 @@ import requests
 from dotenv import load_dotenv
 
 # -------------------------------------------------
-# PATH FIX (so utils/ and app/ always work)
+# PATH FIX
 # -------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -22,7 +22,6 @@ load_dotenv()
 # -------------------------------------------------
 # CONFIG
 # -------------------------------------------------
-ENSEMBLE_CSV = ROOT / "models" / "ensemble" / "ensemble_next_30.csv"
 MAX_YEARS = 5
 
 st.set_page_config(
@@ -31,75 +30,47 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# SAFE FX CONVERSION (USD → INR)
+# FX RATE
 # -------------------------------------------------
 @st.cache_data(ttl=6 * 60 * 60)
 def get_usd_inr_rate():
     try:
-        url = "https://api.frankfurter.app/latest?from=USD&to=INR"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        return float(data["rates"]["INR"])
+        r = requests.get(
+            "https://api.frankfurter.app/latest?from=USD&to=INR",
+            timeout=10
+        )
+        return float(r.json()["rates"]["INR"])
     except Exception:
-        st.warning("⚠️ FX API unavailable. Using fallback rate ₹83.0")
         return 83.0
 
 
 # -------------------------------------------------
-# LOAD HISTORICAL DATA (Snowflake)
+# LOAD DATA FROM SNOWFLAKE (READ-ONLY)
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_actuals():
     session = get_snowflake_session()
-    df = session.table("GOLD_PROJECT.PROCESSED.MASTER_GOLD_DATA").to_pandas()
+    df = session.table(
+        "GOLD_PROJECT.PROCESSED.MASTER_GOLD_DATA"
+    ).to_pandas()
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    return df.set_index("DATE")
+
+
+@st.cache_data(ttl=3600)
+def load_ensemble_forecast():
+    session = get_snowflake_session()
+    df = session.table(
+        "GOLD_PROJECT.PROCESSED.ENSEMBLE_FORECAST"
+    ).to_pandas()
     df["DATE"] = pd.to_datetime(df["DATE"])
     return df.set_index("DATE")
 
 
 # -------------------------------------------------
-# LOAD / GENERATE ENSEMBLE (CRITICAL FIX)
-# -------------------------------------------------
-@st.cache_data(ttl=3600)
-def load_ensemble_30():
-    """
-    Priority:
-    1) Local CSV (development only)
-    2) Live ensemble inference (Streamlit Cloud / production)
-    """
-
-    # ---------- Option 1: Local CSV ----------
-    if ENSEMBLE_CSV.exists():
-        df = pd.read_csv(ENSEMBLE_CSV, parse_dates=["date"])
-        return df.set_index("date")
-
-    # ---------- Option 2: Run ensemble dynamically ----------
-    from app.models.ensemble_model import run_ensemble_and_evaluate
-
-    result = run_ensemble_and_evaluate(save_csv=False)
-    preds = result["ensemble"]["next_month"]
-
-    actuals = load_actuals()
-    last_date = actuals.index[-1]
-
-    future_dates = pd.date_range(
-        start=last_date + timedelta(days=1),
-        periods=len(preds),
-        freq="D"
-    )
-
-    return pd.DataFrame(
-        {"ensemble_pred": preds},
-        index=future_dates
-    )
-
-
-# -------------------------------------------------
-# RECURSIVE FORECAST (LONG HORIZON)
+# RECURSIVE EXTENSION (LONG HORIZON)
 # -------------------------------------------------
 def recursive_forecast(base_preds, horizon_days):
-    """
-    Extends ensemble predictions beyond 30 days using average drift.
-    """
     preds = list(base_preds)
 
     if horizon_days <= len(preds):
@@ -116,10 +87,9 @@ def recursive_forecast(base_preds, horizon_days):
 # -------------------------------------------------
 # UI
 # -------------------------------------------------
-st.title("Gold Price Forecast — Ensemble (Chronos T5 + NHITS)")
-st.caption("Investor-grade forecasting • Daily → 5-Year horizon")
+st.title("Gold Price Forecast — Ensemble")
+st.caption("Chronos T5 + NHITS • Investor-grade forecasting")
 
-# Sidebar controls
 with st.sidebar:
     st.header("Forecast Horizon")
 
@@ -135,23 +105,20 @@ with st.sidebar:
         months = st.slider("Months", 0, 11, 0)
         days = st.slider("Days", 0, 30, 0)
 
-    st.markdown("**Currency:** INR (₹)")
-
 
 # -------------------------------------------------
-# LOAD EVERYTHING
+# LOAD DATA
 # -------------------------------------------------
-with st.spinner("Loading data & running ensemble forecast…"):
+with st.spinner("Loading data…"):
     actuals = load_actuals()
-    ensemble_30 = load_ensemble_30()
+    ensemble = load_ensemble_forecast()
     usd_inr = get_usd_inr_rate()
 
-# Convert to INR
 actuals["GOLD_CLOSE"] *= usd_inr
-ensemble_30.iloc[:, 0] *= usd_inr
+ensemble["ENSEMBLE_PRED"] *= usd_inr
 
 # -------------------------------------------------
-# DETERMINE HORIZON
+# HORIZON
 # -------------------------------------------------
 if mode == "Preset":
     horizon_days = {
@@ -162,21 +129,22 @@ if mode == "Preset":
         "5 Years": 365 * 5
     }[preset]
 else:
-    horizon_days = years * 365 + months * 30 + days
-    horizon_days = max(1, min(horizon_days, 365 * MAX_YEARS))
+    horizon_days = max(
+        1,
+        min(years * 365 + months * 30 + days, 365 * MAX_YEARS)
+    )
 
 # -------------------------------------------------
-# RUN FORECAST
+# FORECAST
 # -------------------------------------------------
 future_preds = recursive_forecast(
-    ensemble_30.iloc[:, 0].tolist(),
+    ensemble["ENSEMBLE_PRED"].tolist(),
     horizon_days
 )
 
 future_dates = pd.date_range(
     start=actuals.index[-1] + timedelta(days=1),
-    periods=horizon_days,
-    freq="D"
+    periods=horizon_days
 )
 
 forecast_df = pd.DataFrame(
@@ -185,71 +153,43 @@ forecast_df = pd.DataFrame(
 )
 
 # -------------------------------------------------
-# STATUS
-# -------------------------------------------------
-st.success(f"Historical rows: {len(actuals)} | Last date: {actuals.index[-1].date()}")
-st.success(f"Forecast horizon: {horizon_days} days")
-
-# -------------------------------------------------
 # PLOT
 # -------------------------------------------------
-st.header("Historical & Forecast")
-
 fig = go.Figure()
 
 fig.add_trace(go.Scatter(
     x=actuals.index[-730:],
     y=actuals["GOLD_CLOSE"].iloc[-730:],
-    name="Historical Actuals",
-    line=dict(color="royalblue")
+    name="Historical"
 ))
 
 fig.add_trace(go.Scatter(
     x=forecast_df.index,
     y=forecast_df["Prediction (₹)"],
-    name="Ensemble Forecast",
-    mode="lines",
-    line=dict(color="orange")
+    name="Ensemble Forecast"
 ))
 
 fig.update_layout(
     height=550,
-    xaxis_title="Date",
-    yaxis_title="Gold Price (₹)",
     template="plotly_dark"
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------------------------
-# PREDICTIONS
+# OUTPUT
 # -------------------------------------------------
-st.header("Predictions")
-
 st.metric(
     "Next Day Prediction (₹)",
-    f"₹ {forecast_df.iloc[0, 0]:,.2f}"
+    f"₹ {forecast_df.iloc[0,0]:,.2f}"
 )
 
-if horizon_days >= 7:
-    st.subheader("Next 7 Days")
-    st.table(forecast_df.head(7))
-
-st.subheader("Forecast Curve")
 st.line_chart(forecast_df["Prediction (₹)"])
-
-if st.checkbox("Show full forecast table"):
-    st.dataframe(forecast_df)
 
 st.download_button(
     "Download Forecast CSV",
     forecast_df.to_csv().encode(),
-    "gold_forecast_inr.csv",
-    "text/csv"
+    "gold_forecast.csv"
 )
 
-# -------------------------------------------------
-# FOOTER
-# -------------------------------------------------
-st.markdown("---")
-st.caption("Ensemble = Chronos T5 (short-term) + NHITS (long-term). Recursive extension beyond 30 days.")
+st.caption("Dashboard is read-only. Models run outside UI.")
