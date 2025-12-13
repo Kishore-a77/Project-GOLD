@@ -1,4 +1,3 @@
-# app/views/dashboard.py
 import sys
 from pathlib import Path
 from datetime import timedelta
@@ -11,7 +10,7 @@ import requests
 from dotenv import load_dotenv
 
 # -------------------------------------------------
-# PATH FIX (so utils/ works always)
+# PATH FIX (so utils/ and app/ always work)
 # -------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -47,7 +46,7 @@ def get_usd_inr_rate():
 
 
 # -------------------------------------------------
-# LOAD DATA
+# LOAD HISTORICAL DATA (Snowflake)
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_actuals():
@@ -57,25 +56,55 @@ def load_actuals():
     return df.set_index("DATE")
 
 
+# -------------------------------------------------
+# LOAD / GENERATE ENSEMBLE (CRITICAL FIX)
+# -------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_ensemble_30():
-    df = pd.read_csv(ENSEMBLE_CSV, parse_dates=["date"])
-    return df.set_index("date")
-
-
-# -------------------------------------------------
-# RECURSIVE FORECAST (key logic)
-# -------------------------------------------------
-def recursive_forecast(last_series, base_preds, horizon_days):
     """
-    Extends ensemble predictions beyond 30 days using drift.
+    Priority:
+    1) Local CSV (development only)
+    2) Live ensemble inference (Streamlit Cloud / production)
+    """
+
+    # ---------- Option 1: Local CSV ----------
+    if ENSEMBLE_CSV.exists():
+        df = pd.read_csv(ENSEMBLE_CSV, parse_dates=["date"])
+        return df.set_index("date")
+
+    # ---------- Option 2: Run ensemble dynamically ----------
+    from app.models.ensemble_model import run_ensemble_and_evaluate
+
+    result = run_ensemble_and_evaluate(save_csv=False)
+    preds = result["ensemble"]["next_month"]
+
+    actuals = load_actuals()
+    last_date = actuals.index[-1]
+
+    future_dates = pd.date_range(
+        start=last_date + timedelta(days=1),
+        periods=len(preds),
+        freq="D"
+    )
+
+    return pd.DataFrame(
+        {"ensemble_pred": preds},
+        index=future_dates
+    )
+
+
+# -------------------------------------------------
+# RECURSIVE FORECAST (LONG HORIZON)
+# -------------------------------------------------
+def recursive_forecast(base_preds, horizon_days):
+    """
+    Extends ensemble predictions beyond 30 days using average drift.
     """
     preds = list(base_preds)
 
     if horizon_days <= len(preds):
         return preds[:horizon_days]
 
-    # Average daily drift from last 14 days
     drift = np.mean(np.diff(preds[-14:]))
 
     for _ in range(horizon_days - len(preds)):
@@ -88,9 +117,9 @@ def recursive_forecast(last_series, base_preds, horizon_days):
 # UI
 # -------------------------------------------------
 st.title("Gold Price Forecast — Ensemble (Chronos T5 + NHITS)")
-st.caption("Investor-grade long-horizon forecasting (up to 5 years)")
+st.caption("Investor-grade forecasting • Daily → 5-Year horizon")
 
-# Controls
+# Sidebar controls
 with st.sidebar:
     st.header("Forecast Horizon")
 
@@ -140,14 +169,14 @@ else:
 # RUN FORECAST
 # -------------------------------------------------
 future_preds = recursive_forecast(
-    actuals["GOLD_CLOSE"],
     ensemble_30.iloc[:, 0].tolist(),
     horizon_days
 )
 
 future_dates = pd.date_range(
     start=actuals.index[-1] + timedelta(days=1),
-    periods=horizon_days
+    periods=horizon_days,
+    freq="D"
 )
 
 forecast_df = pd.DataFrame(
@@ -158,7 +187,7 @@ forecast_df = pd.DataFrame(
 # -------------------------------------------------
 # STATUS
 # -------------------------------------------------
-st.success(f"Loaded historical data: {len(actuals)} rows (last date: {actuals.index[-1].date()})")
+st.success(f"Historical rows: {len(actuals)} | Last date: {actuals.index[-1].date()}")
 st.success(f"Forecast horizon: {horizon_days} days")
 
 # -------------------------------------------------
@@ -179,7 +208,7 @@ fig.add_trace(go.Scatter(
     x=forecast_df.index,
     y=forecast_df["Prediction (₹)"],
     name="Ensemble Forecast",
-    mode="lines+markers",
+    mode="lines",
     line=dict(color="orange")
 ))
 
@@ -212,7 +241,6 @@ st.line_chart(forecast_df["Prediction (₹)"])
 if st.checkbox("Show full forecast table"):
     st.dataframe(forecast_df)
 
-# Download
 st.download_button(
     "Download Forecast CSV",
     forecast_df.to_csv().encode(),
@@ -224,4 +252,4 @@ st.download_button(
 # FOOTER
 # -------------------------------------------------
 st.markdown("---")
-st.caption("All values shown in INR (₹). Forecast uses ensemble recursive extension beyond 30 days.")
+st.caption("Ensemble = Chronos T5 (short-term) + NHITS (long-term). Recursive extension beyond 30 days.")
