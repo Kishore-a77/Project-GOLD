@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Trained ML models (DO NOT PUSH)
+models/nhits_model/
+models/chronos_model/
+models/chronos_t5/
+models/*.pt
+models/*.pth
+models/*.ckpt
+models/*.bin
+
+# Generated data
+models/ensemble/
+data/processed/
