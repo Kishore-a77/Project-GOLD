@@ -1,16 +1,21 @@
 """
 DAY 11 – FINAL ENSEMBLE (Chronos + NHITS)
-Fully fixed version — correct imports — no autodetection — no errors.
+SQLite-compatible version (Snowflake removed)
 """
 
 import numpy as np
 import pandas as pd
+import sqlite3
 from pathlib import Path
 
-# Correct imports from your actual files:
-from app.viewmodels.prediction_service import run_chronos_predictions            # Chronos :contentReference[oaicite:0]{index=0}
-from app.models.day10_nhits import inference_only as run_nhits_predictions       # NHITS  :contentReference[oaicite:1]{index=1}
-from app.viewmodels.snowflake_data_loader import load_processed_data
+# Correct imports from your actual files
+from app.viewmodels.prediction_service import run_chronos_predictions
+from app.models.day10_nhits import inference_only as run_nhits_predictions
+
+# -------------------------------------------------
+# CONFIG
+# -------------------------------------------------
+DB_PATH = Path("database/gold_data.db")
 
 # Ensemble weights
 WEIGHTS = {
@@ -19,6 +24,10 @@ WEIGHTS = {
     "next_month": (0.3, 0.7),
 }
 
+
+# -------------------------------------------------
+# HELPERS
+# -------------------------------------------------
 def combine(c_vals, n_vals, wc, wn):
     c_vals = np.array(c_vals, dtype=float)
     n_vals = np.array(n_vals, dtype=float)
@@ -43,7 +52,6 @@ def combine(c_vals, n_vals, wc, wn):
     return result
 
 
-# Metrics
 def compute_mape(y_true, y_pred):
     y_true = np.array(y_true, dtype=float)
     y_pred = np.array(y_pred, dtype=float)
@@ -64,8 +72,57 @@ def evaluate(true_vals, pred_vals):
     return {"mae": mae, "rmse": rmse, "mape": mape}
 
 
-# ---- MAIN ----
-def run_ensemble(save_csv=True):
+# -------------------------------------------------
+# SQLITE LOADERS / WRITERS
+# -------------------------------------------------
+def load_actuals_from_sqlite():
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql(
+        """
+        SELECT
+            date,
+            gold_close AS GOLD_CLOSE
+        FROM features
+        ORDER BY date
+        """,
+        conn
+    )
+    conn.close()
+
+    df["date"] = pd.to_datetime(df["date"])
+    return df.set_index("date")
+
+
+def save_ensemble_to_sqlite(forecast_df):
+    conn = sqlite3.connect(DB_PATH)
+
+    # Ensure table exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ensemble_forecast (
+            date TEXT PRIMARY KEY,
+            ensemble_pred REAL
+        )
+    """)
+
+    forecast_df.reset_index().rename(
+        columns={
+            "index": "date",
+            "ensemble_pred": "ensemble_pred"
+        }
+    ).to_sql(
+        "ensemble_forecast",
+        conn,
+        if_exists="replace",
+        index=False
+    )
+
+    conn.close()
+
+
+# -------------------------------------------------
+# MAIN
+# -------------------------------------------------
+def run_ensemble(save_csv=True, save_sqlite=True):
     print("\n[Ensemble] Fetching Chronos predictions...")
     chronos = run_chronos_predictions()
 
@@ -76,7 +133,9 @@ def run_ensemble(save_csv=True):
 
     # next-day
     w_c, w_n = WEIGHTS["next_day"]
-    ensemble["next_day"] = float(w_c * chronos["next_day"] + w_n * nhits["next_day"])
+    ensemble["next_day"] = float(
+        w_c * chronos["next_day"] + w_n * nhits["next_day"]
+    )
 
     # next-week
     w_c, w_n = WEIGHTS["next_week"]
@@ -90,10 +149,10 @@ def run_ensemble(save_csv=True):
         chronos["next_month"], nhits["next_month"], w_c, w_n
     )[:30]
 
-    # Evaluation
-    df = load_processed_data()
-    df["DATE"] = pd.to_datetime(df["DATE"])
-    df = df.set_index("DATE")
+    # -------------------------------------------------
+    # Evaluation (SQLite actuals)
+    # -------------------------------------------------
+    df = load_actuals_from_sqlite()
     actual = df["GOLD_CLOSE"].values[-30:].tolist()
     pred = ensemble["next_month"][:30]
 
@@ -102,18 +161,28 @@ def run_ensemble(save_csv=True):
     print("\n[Ensemble] Metrics on last 30 days:")
     print(metrics)
 
-    # Save
+    # -------------------------------------------------
+    # Save outputs
+    # -------------------------------------------------
+    last_date = df.index[-1]
+    dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=30, freq="D")
+
+    forecast_df = pd.DataFrame(
+        {"ensemble_pred": ensemble["next_month"]},
+        index=dates
+    )
+
     if save_csv:
         out_dir = Path("models/ensemble")
         out_dir.mkdir(parents=True, exist_ok=True)
+        forecast_df.reset_index().rename(
+            columns={"index": "date"}
+        ).to_csv(out_dir / "ensemble_next_30.csv", index=False)
+        print(f"[Ensemble] CSV saved -> {out_dir / 'ensemble_next_30.csv'}")
 
-        last_date = df.index[-1]
-        dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=30, freq="D")
-
-        out = pd.DataFrame({"date": dates, "ensemble_pred": ensemble["next_month"]})
-        out.to_csv(out_dir / "ensemble_next_30.csv", index=False)
-
-        print(f"[Ensemble] Saved -> {out_dir / 'ensemble_next_30.csv'}")
+    if save_sqlite:
+        save_ensemble_to_sqlite(forecast_df)
+        print("[Ensemble] Saved to SQLite table: ensemble_forecast")
 
     return {"predictions": ensemble, "metrics": metrics}
 

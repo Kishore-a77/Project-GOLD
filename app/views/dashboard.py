@@ -1,4 +1,5 @@
 import sys
+import sqlite3
 from pathlib import Path
 from datetime import timedelta
 
@@ -15,14 +16,13 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from utils.config import get_snowflake_session
-
 load_dotenv()
 
 # -------------------------------------------------
 # CONFIG
 # -------------------------------------------------
 MAX_YEARS = 5
+DB_PATH = ROOT / "database" / "gold_data.db"
 
 st.set_page_config(
     page_title="Gold Price Forecast — Ensemble",
@@ -46,26 +46,44 @@ def get_usd_inr_rate():
 
 
 # -------------------------------------------------
-# LOAD DATA FROM SNOWFLAKE (READ-ONLY)
+# LOAD DATA FROM SQLITE (READ-ONLY)
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_actuals():
-    session = get_snowflake_session()
-    df = session.table(
-        "GOLD_PROJECT.PROCESSED.MASTER_GOLD_DATA"
-    ).to_pandas()
-    df["DATE"] = pd.to_datetime(df["DATE"])
-    return df.set_index("DATE")
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql(
+        """
+        SELECT
+            date,
+            gold_close AS GOLD_CLOSE
+        FROM features
+        ORDER BY date
+        """,
+        conn
+    )
+    conn.close()
+
+    df["date"] = pd.to_datetime(df["date"])
+    return df.set_index("date")
 
 
 @st.cache_data(ttl=3600)
 def load_ensemble_forecast():
-    session = get_snowflake_session()
-    df = session.table(
-        "GOLD_PROJECT.PROCESSED.ENSEMBLE_FORECAST"
-    ).to_pandas()
-    df["DATE"] = pd.to_datetime(df["DATE"])
-    return df.set_index("DATE")
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql(
+        """
+        SELECT
+            date,
+            ensemble_pred AS ENSEMBLE_PRED
+        FROM ensemble_forecast
+        ORDER BY date
+        """,
+        conn
+    )
+    conn.close()
+
+    df["date"] = pd.to_datetime(df["date"])
+    return df.set_index("date")
 
 
 # -------------------------------------------------
@@ -81,7 +99,6 @@ def recursive_forecast(base_preds, horizon_days, fallback_value):
         → zero/low drift extension
     """
 
-    # ---- Case 1: No ensemble data ----
     if base_preds is None or len(base_preds) == 0:
         st.warning(
             "⚠️ Ensemble forecast not available yet. "
@@ -91,11 +108,9 @@ def recursive_forecast(base_preds, horizon_days, fallback_value):
 
     preds = list(base_preds)
 
-    # ---- Case 2: Enough predictions ----
     if horizon_days <= len(preds):
         return preds[:horizon_days]
 
-    # ---- Case 3: Extend recursively ----
     if len(preds) < 2:
         drift = 0.0
     else:
@@ -113,7 +128,7 @@ def recursive_forecast(base_preds, horizon_days, fallback_value):
 # UI
 # -------------------------------------------------
 st.title("Gold Price Forecast — Ensemble")
-st.caption("Chronos T5 + NHITS • Investor-grade forecasting")
+st.caption("Chronos-T5 + N-HiTS • Investor-grade forecasting")
 
 with st.sidebar:
     st.header("Forecast Horizon")
@@ -234,5 +249,5 @@ st.download_button(
 
 st.caption(
     "Dashboard is read-only. "
-    "Models (Chronos T5 + NHITS) run outside the UI via scheduled pipelines."
+    "Models (Chronos-T5 + N-HiTS) run outside the UI via scheduled pipelines."
 )

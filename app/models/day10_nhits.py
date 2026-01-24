@@ -1,4 +1,4 @@
-import os
+import sqlite3
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -10,15 +10,14 @@ from darts.models import NHiTSModel
 from darts.metrics import mape, mae, rmse
 from sklearn.preprocessing import MinMaxScaler
 
-# Your Snowflake loader
-from app.viewmodels.snowflake_data_loader import load_processed_data
-
 load_dotenv()
 
 # ---------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
+DB_PATH = ROOT / "database" / "gold_data.db"
+
 MODEL_DIR = ROOT / "models" / "nhits_model"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -27,33 +26,54 @@ INPUT_LEN = 90
 VAL_LEN = 200
 TEST_LEN = 30
 
+MIN_REQUIRED_ROWS = INPUT_LEN + VAL_LEN + TEST_LEN + 5
+
+
+# ---------------------------------------------------------
+# SQLITE DATA LOADER
+# ---------------------------------------------------------
+def load_processed_data_sqlite() -> pd.DataFrame:
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql(
+        """
+        SELECT
+            date,
+            gold_close AS GOLD_CLOSE
+        FROM features
+        ORDER BY date
+        """,
+        conn
+    )
+    conn.close()
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    return df
+
 
 # ---------------------------------------------------------
 # DATA PREPARATION
 # ---------------------------------------------------------
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Fix datetime index, fill missing dates, clean values."""
+    """Ensure continuous daily datetime index and clean values."""
 
-    # convert DATE column to index
-    if "DATE" in df.columns:
-        df = df.copy()
-        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-        df = df.set_index("DATE")
+    if df.empty:
+        raise ValueError("Input dataframe is empty. Cannot train NHITS.")
 
-    # convert index to datetime
-    df.index = pd.to_datetime(df.index, errors="coerce")
+    df = df.copy()
+    df = df.set_index("date").sort_index()
 
-    # Remove rows where index is NaT (safe)
-    df = df[~df.index.isna()]
+    if df.index.min() is pd.NaT or df.index.max() is pd.NaT:
+        raise ValueError("Invalid datetime index after parsing dates.")
 
-    # Build complete daily index
+    # Reindex to full daily range
     full_index = pd.date_range(df.index.min(), df.index.max(), freq="D")
     df = df.reindex(full_index)
 
     if "GOLD_CLOSE" not in df.columns:
         raise ValueError("GOLD_CLOSE column missing")
 
-    # Fill forward/backward + interpolation
+    # Fill gaps safely
     df["GOLD_CLOSE"] = (
         df["GOLD_CLOSE"]
         .ffill()
@@ -63,11 +83,14 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .bfill()
     )
 
-    # Set frequency
+    if len(df) < MIN_REQUIRED_ROWS:
+        raise ValueError(
+            f"Not enough data for NHITS. "
+            f"Required ≥ {MIN_REQUIRED_ROWS}, found {len(df)}"
+        )
+
     df.index.freq = "D"
-
     return df
-
 
 
 def prepare_series(df: pd.DataFrame):
@@ -76,9 +99,7 @@ def prepare_series(df: pd.DataFrame):
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(values)
 
-    series = pd.Series(scaled.reshape(-1), index=df.index)
-    series = series.asfreq("D")
-
+    series = pd.Series(scaled.reshape(-1), index=df.index).asfreq("D")
     ts = TimeSeries.from_series(series)
     return ts, scaler
 
@@ -107,15 +128,19 @@ def train_nhits(ts: TimeSeries):
         optimizer_kwargs={"lr": 1e-4},
         random_state=42,
         force_reset=True,
-        save_checkpoints=True
+        save_checkpoints=True,
+        pl_trainer_kwargs={
+            "enable_progress_bar": True,
+            "deterministic": True
+        }
     )
 
     model.fit(train_ts, val_series=val_ts)
 
     save_path = str(MODEL_DIR / "nhits_model_vfinal")
     model.save(save_path)
-
     print("[NHITS] Saved:", save_path)
+
     return model, train_ts, val_ts, test_ts
 
 
@@ -140,66 +165,72 @@ def predict_nhits(model, ts, scaler):
 # MAIN TRAIN + PREDICT
 # ---------------------------------------------------------
 def main_train_and_predict():
-    df = load_processed_data()
+    df = load_processed_data_sqlite()
     df = prepare_dataframe(df)
 
     ts, scaler = prepare_series(df)
 
     model, train_ts, val_ts, test_ts = train_nhits(ts)
 
-    # Evaluate
-    pred_scaled = model.predict(n=len(test_ts), series=train_ts[-INPUT_LEN:])
+    # Evaluate on test window
+    pred_scaled = model.predict(n=len(test_ts), series=ts)
     pred_inv = scaler.inverse_transform(pred_scaled.all_values().reshape(-1, 1))
     actual_inv = scaler.inverse_transform(test_ts.all_values().reshape(-1, 1))
 
-    pred_series = TimeSeries.from_times_and_values(test_ts.time_index, pred_inv.reshape(-1))
-    actual_series = TimeSeries.from_times_and_values(test_ts.time_index, actual_inv.reshape(-1))
+    pred_series = TimeSeries.from_times_and_values(
+        test_ts.time_index, pred_inv.reshape(-1)
+    )
+    actual_series = TimeSeries.from_times_and_values(
+        test_ts.time_index, actual_inv.reshape(-1)
+    )
 
-    mape_v = mape(actual_series, pred_series)
-    mae_v = mae(actual_series, pred_series)
-    rmse_v = rmse(actual_series, pred_series)
+    print(
+        f"[NHITS] test "
+        f"MAPE={mape(actual_series, pred_series):.4f}, "
+        f"MAE={mae(actual_series, pred_series):.4f}, "
+        f"RMSE={rmse(actual_series, pred_series):.4f}"
+    )
 
-    print(f"[NHITS] test MAPE={mape_v}, MAE={mae_v}, RMSE={rmse_v}")
-
-    # future forecasts
     preds = predict_nhits(model, ts, scaler)
 
     last_date = df.index.max()
-    future_index = pd.date_range(last_date + pd.Timedelta(days=1), periods=PRED_LEN, freq="D")
+    future_index = pd.date_range(
+        last_date + pd.Timedelta(days=1),
+        periods=PRED_LEN,
+        freq="D"
+    )
 
-    pd.DataFrame({"pred": preds["next_month"]}, index=future_index).to_csv(
-        MODEL_DIR / "nhits_next_30.csv", index_label="date"
+    pd.DataFrame(
+        {"pred": preds["next_month"]},
+        index=future_index
+    ).to_csv(
+        MODEL_DIR / "nhits_next_30.csv",
+        index_label="date"
     )
 
     print("[NHITS] next 30-day forecast saved")
     return preds
 
+
 # ---------------------------------------------------------
-# INFERENCE ONLY (for Ensemble)
+# INFERENCE ONLY (USED BY ENSEMBLE)
 # ---------------------------------------------------------
 def inference_only():
-    """
-    Loads the saved NHITS model and returns predictions
-    without retraining. This is used by the ensemble script.
-    """
-    df = load_processed_data()
+    df = load_processed_data_sqlite()
     df = prepare_dataframe(df)
 
     ts, scaler = prepare_series(df)
 
-    # Load saved model
-    model_path = str(MODEL_DIR / "nhits_model_vfinal")
-    if not Path(model_path).exists():
+    model_path = MODEL_DIR / "nhits_model_vfinal"
+    if not model_path.exists():
         raise FileNotFoundError(
             f"NHITS model not found at {model_path}. "
-            "Run main_train_and_predict() once to create it."
+            "Run main_train_and_predict() once."
         )
 
-    model = NHiTSModel.load(model_path)
+    model = NHiTSModel.load(str(model_path))
+    return predict_nhits(model, ts, scaler)
 
-    # Predict next 30 days
-    preds = predict_nhits(model, ts, scaler)
-    return preds
 
 # ---------------------------------------------------------
 # ENTRY POINT
