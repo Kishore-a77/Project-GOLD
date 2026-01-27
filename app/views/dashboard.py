@@ -419,9 +419,3 @@ st.download_button(
     "text/csv",
     help="Download the forecast data with conversion details"
 )
-
-st.caption(
-    "📊 Dashboard is read-only. "
-    "Models (Chronos-T5 + N-HiTS) run outside the UI via scheduled pipelines. "
-    "Prices are in Indian Rupees (₹) for the specified weight."
-)
