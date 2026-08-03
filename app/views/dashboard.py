@@ -1,5 +1,4 @@
 import sys
-import sqlite3
 from pathlib import Path
 from datetime import timedelta
 
@@ -9,6 +8,7 @@ import numpy as np
 import plotly.graph_objects as go
 import requests
 from dotenv import load_dotenv
+from app.db.supabase_client import engine
 
 # -------------------------------------------------
 # PATH FIX
@@ -22,7 +22,6 @@ load_dotenv()
 # CONFIG
 # -------------------------------------------------
 MAX_YEARS = 5
-DB_PATH = ROOT / "database" / "gold_data.db"
 
 st.set_page_config(
     page_title="Gold Price Forecast — Ensemble",
@@ -93,55 +92,19 @@ def convert_usd_per_oz_to_inr_per_gram(
 
 
 # -------------------------------------------------
-# SQLITE LOADERS
+# SUPABASE LOADERS
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_actuals():
-
-    conn = sqlite3.connect(DB_PATH)
-
-    df = pd.read_sql(
-        """
-        SELECT
-            date,
-            gold_close AS GOLD_CLOSE
-        FROM features
-        ORDER BY date
-        """,
-        conn
-    )
-
-    conn.close()
-
+    df = pd.read_sql('SELECT date, gold_close AS "GOLD_CLOSE" FROM features ORDER BY date', engine)
     df["date"] = pd.to_datetime(df["date"])
-
-    df = df.dropna()
-
     return df.set_index("date")
 
 
 @st.cache_data(ttl=3600)
 def load_ensemble_forecast():
-
-    conn = sqlite3.connect(DB_PATH)
-
-    df = pd.read_sql(
-        """
-        SELECT
-            date,
-            ensemble_pred AS ENSEMBLE_PRED
-        FROM ensemble_forecast
-        ORDER BY date
-        """,
-        conn
-    )
-
-    conn.close()
-
+    df = pd.read_sql('SELECT date, ensemble_pred AS "ENSEMBLE_PRED" FROM ensemble_forecast ORDER BY date', engine)
     df["date"] = pd.to_datetime(df["date"])
-
-    df = df.dropna()
-
     return df.set_index("date")
 
 

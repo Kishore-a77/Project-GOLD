@@ -1,47 +1,77 @@
-import sqlite3
+"""
+Ingest historical gold prices from Yahoo Finance
+and store them in Supabase.
+
+Author: Kishore A
+Project: Project GOLD
+"""
+
 import pandas as pd
 import yfinance as yf
-from pathlib import Path
-
-DB_PATH = Path("database/gold_data.db")
+from database.supabase_client import supabase
 
 # -------------------------------------------------
 # FETCH HISTORICAL GOLD DATA (USD)
 # -------------------------------------------------
-# Gold futures ticker (industry standard)
-ticker = "GC=F"
+
+TICKER = "GC=F"
+
+print("Downloading historical gold prices...")
 
 df = yf.download(
-    ticker,
+    TICKER,
     start="2000-01-01",
     progress=False
 )
 
 if df.empty:
-    raise RuntimeError("Failed to download gold price history")
+    raise RuntimeError("Failed to download historical gold price data.")
+
+# -------------------------------------------------
+# PREPARE DATA
+# -------------------------------------------------
 
 df = df.reset_index()
-df = df[["Date", "Close"]]
-df.columns = ["date", "gold_close"]
 
-# Dummy placeholders (can be enriched later)
+df = df[["Date", "Close"]]
+
+df.columns = [
+    "date",
+    "gold_close"
+]
+
+# Placeholder columns
 df["usd_index"] = None
 df["fx_inr"] = None
 
-df["date"] = pd.to_datetime(df["date"])
+# Convert date to string for PostgreSQL
+df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+
+# Replace NaN with None (Supabase/Postgres expects None for NULL)
+df = df.where(pd.notnull(df), None)
+
+rows = df.to_dict(orient="records")
+
+print(f"Uploading {len(rows)} rows to Supabase...")
 
 # -------------------------------------------------
-# SAVE TO SQLITE
+# UPSERT INTO SUPABASE
 # -------------------------------------------------
-conn = sqlite3.connect(DB_PATH)
 
-df.to_sql(
-    "gold_prices",
-    conn,
-    if_exists="replace",
-    index=False
-)
+BATCH_SIZE = 500
 
-conn.close()
+for i in range(0, len(rows), BATCH_SIZE):
 
-print(f"[OK] gold_prices populated with {len(df)} rows")
+    batch = rows[i:i + BATCH_SIZE]
+
+    response = (
+        supabase
+        .table("gold_prices")
+        .upsert(batch)
+        .execute()
+    )
+
+print("-------------------------------------------------")
+print(f"✅ Successfully uploaded {len(rows)} historical records.")
+print("Table: gold_prices")
+print("-------------------------------------------------")

@@ -5,8 +5,9 @@ SQLite-compatible version (FIXED VERSION)
 
 import numpy as np
 import pandas as pd
-import sqlite3
 from pathlib import Path
+from app.db.supabase_client import engine
+from sqlalchemy import text
 
 # Correct imports
 from app.viewmodels.prediction_service import run_chronos_predictions
@@ -15,7 +16,7 @@ from app.models.day10_nhits import inference_only as run_nhits_predictions
 # -------------------------------------------------
 # CONFIG
 # -------------------------------------------------
-DB_PATH = Path("database/gold_data.db")
+
 
 # Ensemble weights
 WEIGHTS = {
@@ -109,55 +110,31 @@ def evaluate(true_vals, pred_vals):
 
 
 # -------------------------------------------------
-# SQLITE LOADERS / WRITERS
+# SUPABASE LOADERS / WRITERS
 # -------------------------------------------------
-def load_actuals_from_sqlite():
-
-    conn = sqlite3.connect(DB_PATH)
-
-    df = pd.read_sql(
-        """
-        SELECT
-            date,
-            gold_close AS GOLD_CLOSE
-        FROM features
-        ORDER BY date
-        """,
-        conn
-    )
-
-    conn.close()
-
+def load_actuals_from_supabase():
+    df = pd.read_sql('SELECT date, gold_close AS "GOLD_CLOSE" FROM features ORDER BY date', engine)
     df["date"] = pd.to_datetime(df["date"])
-
-    df = df.dropna()
-
     return df.set_index("date")
 
-
-def save_ensemble_to_sqlite(forecast_df):
-
-    conn = sqlite3.connect(DB_PATH)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS ensemble_forecast (
-            date TEXT PRIMARY KEY,
-            ensemble_pred REAL
-        )
-    """)
-
-    forecast_df.reset_index().rename(
-        columns={
-            "index": "date"
-        }
-    ).to_sql(
-        "ensemble_forecast",
-        conn,
-        if_exists="replace",
-        index=False
-    )
-
-    conn.close()
+def save_ensemble_to_supabase(forecast_df):
+    # Ensure proper format
+    out = forecast_df.reset_index().rename(columns={"index": "date"})
+    out["date"] = pd.to_datetime(out["date"])
+    
+    # Create table if it doesn't exist, clear old predictions, and insert new
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ensemble_forecast (
+                date TIMESTAMP PRIMARY KEY,
+                ensemble_pred DOUBLE PRECISION
+            )
+        """))
+        conn.execute(text("TRUNCATE TABLE ensemble_forecast"))
+        conn.commit()
+    
+    out.to_sql("ensemble_forecast", engine, if_exists="append", index=False)
+    print("[Ensemble] Saved to Supabase table: ensemble_forecast")
 
 
 # -------------------------------------------------
@@ -212,7 +189,7 @@ def run_ensemble(save_csv=True, save_sqlite=True):
     # -------------------------------------------------
     # LOAD ACTUAL DATA
     # -------------------------------------------------
-    df = load_actuals_from_sqlite()
+    df = load_actuals_from_supabase()
 
     actual = df["GOLD_CLOSE"].values[-30:]
 
@@ -293,16 +270,12 @@ def run_ensemble(save_csv=True, save_sqlite=True):
         print(f"\n[Ensemble] CSV saved -> {csv_path}")
 
     # -------------------------------------------------
-    # SAVE SQLITE
+    # SAVE SUPABASE
     # -------------------------------------------------
     if save_sqlite:
 
-        save_ensemble_to_sqlite(
+        save_ensemble_to_supabase(
             forecast_df.set_index("date")
-        )
-
-        print(
-            "[Ensemble] Saved to SQLite table: ensemble_forecast"
         )
 
     print("\n[Ensemble] Forecast Preview:")

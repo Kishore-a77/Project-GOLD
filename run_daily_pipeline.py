@@ -1,14 +1,12 @@
 # run_daily_pipeline.py
 
-import sqlite3
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
 from ta.trend import MACD
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
-
-DB_PATH = "database/gold_data.db"
+from app.db.supabase_client import engine
 
 # -----------------------------
 # Fetch Gold Data
@@ -91,20 +89,15 @@ def generate_features(df):
 
 
 # -----------------------------
-# Save to SQLite
+# Save to Supabase
 # -----------------------------
-def save_to_sqlite(df):
-
-    conn = sqlite3.connect(DB_PATH)
-
-    df.to_sql(
-        "features",
-        conn,
-        if_exists="replace",
-        index=False
-    )
-
-    conn.close()
+def save_to_supabase(df):
+    # Ensure date is datetime
+    df["date"] = pd.to_datetime(df["date"])
+    
+    # Use replace mode (SQLAlchemy drops & recreates, or use delete+append)
+    df.to_sql("features", engine, if_exists="replace", index=False)
+    print("[INFO] Features saved to Supabase.")
 
 
 # -----------------------------
@@ -120,9 +113,9 @@ def run_pipeline():
 
     df = generate_features(df)
 
-    print("[INFO] Saving to SQLite...")
+    print("[INFO] Saving to Supabase...")
 
-    save_to_sqlite(df)
+    save_to_supabase(df)
 
     print("\n[SUCCESS] Daily pipeline completed successfully!")
 

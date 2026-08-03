@@ -3,41 +3,31 @@ Prediction Service — Chronos-T5
 SQLite-based version (Snowflake fully removed)
 """
 
-import sqlite3
-from pathlib import Path
 import numpy as np
 import pandas as pd
 
 from app.models.chronos_t5_model import ChronosT5Model
-
-# -------------------------------------------------
-# CONFIG
-# -------------------------------------------------
-DB_PATH = Path("database/gold_data.db")
+from app.db.supabase_client import engine
 
 
 # -------------------------------------------------
-# LOAD DATA FROM SQLITE
+# LOAD DATA FROM SUPABASE
 # -------------------------------------------------
-def load_data_from_sqlite():
+def load_data_from_supabase():
     """
-    Loads processed gold price data from SQLite.
+    Loads processed gold price data from Supabase.
     Returns a pandas DataFrame indexed by date.
     """
-    conn = sqlite3.connect(DB_PATH)
-
     df = pd.read_sql(
         """
         SELECT
             date,
-            gold_close AS GOLD_CLOSE
+            gold_close AS "GOLD_CLOSE"
         FROM features
         ORDER BY date
         """,
-        conn
+        engine
     )
-
-    conn.close()
 
     df["date"] = pd.to_datetime(df["date"])
     return df.set_index("date")
@@ -52,8 +42,8 @@ def run_chronos_predictions():
     Safely flattens all Chronos output formats.
     """
 
-    # Load data (SQLite instead of Snowflake)
-    df = load_data_from_sqlite()
+    # Load data (Supabase instead of Snowflake)
+    df = load_data_from_supabase()
 
     # Extract univariate series
     series_values = df["GOLD_CLOSE"].values.tolist()

@@ -1,8 +1,8 @@
-import sqlite3
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from app.db.supabase_client import engine
 
 # Darts
 from darts import TimeSeries
@@ -16,7 +16,6 @@ load_dotenv()
 # CONFIGURATION
 # ---------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = ROOT / "database" / "gold_data.db"
 
 MODEL_DIR = ROOT / "models" / "nhits_model"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,21 +29,19 @@ MIN_REQUIRED_ROWS = INPUT_LEN + VAL_LEN + TEST_LEN + 5
 
 
 # ---------------------------------------------------------
-# SQLITE DATA LOADER
+# SUPABASE DATA LOADER
 # ---------------------------------------------------------
-def load_processed_data_sqlite() -> pd.DataFrame:
-    conn = sqlite3.connect(DB_PATH)
+def load_processed_data_supabase() -> pd.DataFrame:
     df = pd.read_sql(
         """
         SELECT
             date,
-            gold_close AS GOLD_CLOSE
+            gold_close AS "GOLD_CLOSE"
         FROM features
         ORDER BY date
         """,
-        conn
+        engine
     )
-    conn.close()
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
@@ -165,7 +162,7 @@ def predict_nhits(model, ts, scaler):
 # MAIN TRAIN + PREDICT
 # ---------------------------------------------------------
 def main_train_and_predict():
-    df = load_processed_data_sqlite()
+    df = load_processed_data_supabase()
     df = prepare_dataframe(df)
 
     ts, scaler = prepare_series(df)
@@ -216,7 +213,7 @@ def main_train_and_predict():
 # INFERENCE ONLY (USED BY ENSEMBLE)
 # ---------------------------------------------------------
 def inference_only():
-    df = load_processed_data_sqlite()
+    df = load_processed_data_supabase()
     df = prepare_dataframe(df)
 
     ts, scaler = prepare_series(df)
