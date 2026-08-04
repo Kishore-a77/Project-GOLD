@@ -95,26 +95,39 @@ def convert_usd_per_oz_to_inr_per_gram(usd_per_oz, usd_inr_rate, weight_grams=1.
 @st.cache_data(ttl=3600)
 def load_actuals():
     """Fetch historical gold prices from Supabase."""
-    response = supabase.table('gold_prices').select('date, close').order('date').execute()
-    df = pd.DataFrame(response.data)
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.rename(columns={"close": "GOLD_CLOSE"})
-    return df.set_index("date")
+    try:
+        response = supabase.table('gold_prices').select('date, close').order('date').execute()
+        df = pd.DataFrame(response.data)
+        if df.empty:
+            st.warning("⚠️ No data in gold_prices table. Run the daily pipeline first.")
+            return pd.DataFrame(columns=["date", "GOLD_CLOSE"])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.rename(columns={"close": "GOLD_CLOSE"})
+        return df.set_index("date")
+    except Exception as e:
+        st.error(f"❌ Error loading gold_prices: {str(e)}")
+        return pd.DataFrame(columns=["date", "GOLD_CLOSE"])
+
 
 @st.cache_data(ttl=3600)
 def load_ensemble_forecast(horizon='30d'):
     """Fetch ensemble predictions from Supabase."""
-    response = (supabase.table('predictions')
-                .select('date, ensemble_pred')
-                .eq('horizon', horizon)
-                .order('date')
-                .execute())
-    df = pd.DataFrame(response.data)
-    if df.empty:
+    try:
+        response = (supabase.table('predictions')
+                    .select('prediction_date, predicted_price')
+                    .eq('horizon', horizon)
+                    .order('prediction_date')
+                    .execute())
+        df = pd.DataFrame(response.data)
+        if df.empty:
+            st.warning(f"⚠️ No predictions found for horizon '{horizon}'. Run the daily pipeline first.")
+            return pd.DataFrame(columns=["date", "ENSEMBLE_PRED"])
+        df["date"] = pd.to_datetime(df["prediction_date"])
+        df = df.rename(columns={"predicted_price": "ENSEMBLE_PRED"})
+        return df.set_index("date")
+    except Exception as e:
+        st.error(f"❌ Error loading predictions: {str(e)}")
         return pd.DataFrame(columns=["date", "ENSEMBLE_PRED"])
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.rename(columns={"ensemble_pred": "ENSEMBLE_PRED"})
-    return df.set_index("date")
 
 # -------------------------------------------------
 # RECURSIVE FORECAST
