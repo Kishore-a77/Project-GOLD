@@ -114,16 +114,16 @@ def load_ensemble_forecast(horizon='30d'):
     """Fetch ensemble predictions from Supabase."""
     try:
         response = (supabase.table('predictions')
-                    .select('prediction_date, predicted_price')
+                    .select('date, ensemble_pred')
                     .eq('horizon', horizon)
-                    .order('prediction_date')
+                    .order('date')
                     .execute())
         df = pd.DataFrame(response.data)
         if df.empty:
             st.warning(f"⚠️ No predictions found for horizon '{horizon}'. Run the daily pipeline first.")
             return pd.DataFrame(columns=["date", "ENSEMBLE_PRED"])
-        df["date"] = pd.to_datetime(df["prediction_date"])
-        df = df.rename(columns={"predicted_price": "ENSEMBLE_PRED"})
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.rename(columns={"ensemble_pred": "ENSEMBLE_PRED"})
         return df.set_index("date")
     except Exception as e:
         st.error(f"❌ Error loading predictions: {str(e)}")
@@ -228,10 +228,19 @@ ensemble = load_ensemble_forecast(horizon_key)
 # -------------------------------------------------
 # CONVERT ACTUALS
 # -------------------------------------------------
+# -------------------------------------------------
+# GUARD: stop early if no actuals data
+# -------------------------------------------------
+if actuals.empty:
+    st.error("❌ No gold price data available. Please run the daily pipeline to populate the database, then reload this page.")
+    st.stop()
+
+# -------------------------------------------------
+# CONVERT ACTUALS
+# -------------------------------------------------
 actuals["GOLD_CLOSE_CONVERTED"] = actuals["GOLD_CLOSE"].apply(
     lambda x: convert_usd_per_oz_to_inr_per_gram(x, usd_inr, weight_grams)
 )
-
 # -------------------------------------------------
 # CONVERT FORECASTS
 # -------------------------------------------------
