@@ -1,0 +1,38 @@
+# Full Pipeline Dependencies
+# Used by GitHub Actions for daily prediction and weekly training pipelines
+# Includes all ML/model dependencies not needed by the dashboard
+
+# Core Data Processing
+numpy==1.26.4
+pandas==2.2.2
+yfinance==0.2.40
+scikit-learn==1.5.2
+
+# Deep Learning
+torch==2.4.0
+torchvision==0.19.0
+torchaudio==2.4.0
+
+# Time Series Forecasting
+u8darts[torch]==0.5.0
+chronos-forecasting==0.3.0
+
+# Visualization
+matplotlib==3.8.2
+plotly==5.22.0
+
+# Database
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+supabase>=2.0
+python-dotenv
+
+# HTTP Requests
+requests
+
+# Technical Indicators
+ta>=0.11
+
+# Jupyter (optional)
+jupyter
+ipykernel

@@ -1,124 +1,182 @@
-# run_daily_pipeline.py
+#!/usr/bin/env python3
+"""
+run_daily_pipeline.py — single entry point for the daily GOLD forecast pipeline.
 
-import pandas as pd
-import yfinance as yf
+Flow:
+  1. Fetch fresh gold-price data (+ macro/FX)
+  2. Store/update data in Supabase
+  3. Feature engineering
+  4. Load model-ready data
+  5. Chronos-T5 inference
+  6. N-HiTS inference
+  7. Ensemble
+  8. Save predictions to Supabase (idempotent upsert on date+horizon)
+  9. Record execution status
+
+Failure handling:
+  * Any stage failure raises (no silent swallowing) and is recorded in
+    pipeline_runs with status='failed'.
+  * Each raised PipelineError carries the failing STAGE name so GitHub Actions
+    logs are easy to read.
+  * The process exits non-zero on failure (GitHub Actions marks the job failed).
+  * Invalid/empty predictions are NEVER persisted (see prediction_service), so a
+    bad run cannot overwrite previously valid predictions.
+  * Secrets (DATABASE_URL password, SUPABASE_KEY) are stripped from all logged
+    and recorded error strings.
+
+Usage:
+  python run_daily_pipeline.py            # full run
+  python run_daily_pipeline.py --dry-run # structure test, no Supabase writes, no heavy models
+"""
+import argparse
+import os
+import sys
+import traceback
 from datetime import datetime
-from ta.trend import MACD
-from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands, AverageTrueRange
-from app.db.supabase_client import engine
 
-# -----------------------------
-# Fetch Gold Data
-# -----------------------------
-def fetch_gold_data():
-    # Fetch 5 years of data
-    gold = yf.download("GC=F", period="5y", interval="1d")
-    gold.reset_index(inplace=True)
+# project root on path
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-    df = pd.DataFrame()
-    df["date"] = pd.to_datetime(gold["Date"]).dt.strftime("%Y-%m-%d")
-    df["gold_close"] = pd.Series(gold["Close"].values.flatten())
-    df["gold_high"] = pd.Series(gold["High"].values.flatten())
-    df["gold_low"] = pd.Series(gold["Low"].values.flatten())
-    df["gold_volume"] = pd.Series(gold["Volume"].values.flatten())
+# load .env (local only; CI uses secrets)
+from dotenv import load_dotenv
+load_dotenv()
 
-    # Fetch Macro Indicators
-    sp500 = yf.download("^GSPC", period="5y", interval="1d")
-    usd_idx = yf.download("DX-Y.NYB", period="5y", interval="1d")
-    treasury = yf.download("^TNX", period="5y", interval="1d")
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("daily_pipeline")
 
-    sp500.reset_index(inplace=True)
-    usd_idx.reset_index(inplace=True)
-    treasury.reset_index(inplace=True)
-
-    sp500_df = pd.DataFrame({
-        "date": pd.to_datetime(sp500["Date"]).dt.strftime("%Y-%m-%d"),
-        "sp500_close": pd.Series(sp500["Close"].values.flatten())
-    })
-    
-    usd_idx_df = pd.DataFrame({
-        "date": pd.to_datetime(usd_idx["Date"]).dt.strftime("%Y-%m-%d"),
-        "usd_idx_close": pd.Series(usd_idx["Close"].values.flatten())
-    })
-
-    treasury_df = pd.DataFrame({
-        "date": pd.to_datetime(treasury["Date"]).dt.strftime("%Y-%m-%d"),
-        "treasury_yield": pd.Series(treasury["Close"].values.flatten())
-    })
-
-    # Merge all datasets
-    df = df.merge(sp500_df, on="date", how="left")
-    df = df.merge(usd_idx_df, on="date", how="left")
-    df = df.merge(treasury_df, on="date", how="left")
-
-    # Forward fill to handle holiday mismatches between markets
-    df.ffill(inplace=True)
-    df.bfill(inplace=True)
-
-    return df
+# imports of services
+from app.db import supabase_client
+from services import data_fetch_service, feature_service, prediction_service
 
 
-# -----------------------------
-# Feature Engineering
-# -----------------------------
-def generate_features(df):
+class PipelineError(RuntimeError):
+    """Carries the failing stage name for clear GitHub Actions logs."""
 
-    df["sma_20"] = df["gold_close"].rolling(20).mean()
-    df["sma_50"] = df["gold_close"].rolling(50).mean()
-    df["ema_20"] = df["gold_close"].ewm(span=20).mean()
-
-    rsi = RSIIndicator(close=df["gold_close"], window=14)
-    df["rsi"] = rsi.rsi()
-    
-    macd = MACD(close=df["gold_close"])
-    df["macd"] = macd.macd()
-
-    # Volatility Features
-    bb = BollingerBands(close=df["gold_close"], window=20, window_dev=2)
-    df["bb_high"] = bb.bollinger_hband()
-    df["bb_low"] = bb.bollinger_lband()
-    df["bb_width"] = bb.bollinger_wband()
-
-    atr = AverageTrueRange(high=df["gold_high"], low=df["gold_low"], close=df["gold_close"], window=14)
-    df["atr"] = atr.average_true_range()
-
-    df.dropna(inplace=True)
-
-    return df
+    def __init__(self, stage, message, cause=None):
+        self.stage = stage
+        super().__init__(message)
+        if cause is not None:
+            self.__cause__ = cause
 
 
-# -----------------------------
-# Save to Supabase
-# -----------------------------
-def save_to_supabase(df):
-    # Ensure date is datetime
-    df["date"] = pd.to_datetime(df["date"])
-    
-    # Use replace mode (SQLAlchemy drops & recreates, or use delete+append)
-    df.to_sql("features", engine, if_exists="replace", index=False)
-    print("[INFO] Features saved to Supabase.")
+def _sanitize(msg):
+    """Remove secret values (DB password, API keys) from a string before logging."""
+    for secret in (
+        os.getenv("DATABASE_URL", ""),
+        os.getenv("SUPABASE_KEY", ""),
+        os.getenv("SUPABASE_SERVICE_KEY", ""),
+    ):
+        if secret:
+            msg = msg.replace(secret, "***")
+    return msg
 
 
-# -----------------------------
-# Main Pipeline
-# -----------------------------
-def run_pipeline():
+def _record_failure(started, err, metrics):
+    """Best-effort record of a failure into pipeline_runs. Never raises."""
+    try:
+        stage = getattr(err, "stage", "unknown")
+        safe_err = _sanitize(f"[{stage}] {err}")
+        prediction_service.record_run_status(
+            started,
+            success=False,
+            error=safe_err,
+            records_processed=metrics.get("records_processed", 0),
+            predictions_generated=0,
+        )
+    except Exception as se:
+        # If Supabase is down we cannot record the failure; log clearly and move on.
+        log.error("Could not record failure to pipeline_runs (Supabase may be unavailable): %s",
+                  _sanitize(str(se)))
 
-    print("\n[INFO] Fetching latest gold data...")
 
-    df = fetch_gold_data()
+def main():
+    parser = argparse.ArgumentParser(description="GOLD daily prediction pipeline")
+    parser.add_argument("--dry-run", action="store_true", help="Test structure without writing predictions/models")
+    args = parser.parse_args()
+    dry = args.dry_run
+    started = datetime.now()
+    metrics = {"records_processed": 0, "predictions_generated": 0}
 
-    print("[INFO] Generating features...")
+    log.info("=" * 70)
+    log.info("PROJECT GOLD — DAILY PREDICTION PIPELINE (dry_run=%s)", dry)
+    log.info("Started: %s", started.isoformat())
+    log.info("=" * 70)
 
-    df = generate_features(df)
+    try:
+        # STAGE 0: schema
+        if not dry:
+            log.info("STAGE 0: Ensure Supabase schema")
+            try:
+                supabase_client.ensure_schema()
+            except Exception as e:
+                raise PipelineError("schema", f"Supabase schema bootstrap failed: {e}") from e
+        else:
+            log.info("STAGE 0: [dry-run] skipping schema bootstrap")
 
-    print("[INFO] Saving to Supabase...")
+        # STAGE 1-2: data ingestion
+        log.info("STAGE 1-2: Fetch gold + macro data → Supabase")
+        try:
+            metrics["records_processed"] = data_fetch_service.run_data_fetch() or 0
+        except Exception as e:
+            raise PipelineError("data_fetch", f"Gold/macro data ingestion failed: {e}") from e
 
-    save_to_supabase(df)
+        # STAGE 3: features
+        log.info("STAGE 3: Feature engineering → Supabase")
+        try:
+            feature_service.run_feature_engineering()
+        except Exception as e:
+            raise PipelineError("features", f"Feature engineering failed: {e}") from e
 
-    print("\n[SUCCESS] Daily pipeline completed successfully!")
+        # STAGE 4-8: predictions + ensemble + store
+        log.info("STAGE 4-8: Load data → Chronos-T5 → N-HiTS → Ensemble → Supabase")
+        try:
+            ensemble, chronos_30, nhits_30, predictions_generated = prediction_service.run_prediction_pipeline(dry_run=dry)
+        except Exception as e:
+            raise PipelineError("predictions", f"Prediction/ensemble stage failed: {e}") from e
+
+        # summary
+        log.info("RESULT next_day=%.2f  next_week[0]=%.2f  next_month[0]=%.2f",
+                 ensemble["next_day"], ensemble["next_week"][0], ensemble["next_month"][0])
+        metrics["predictions_generated"] = predictions_generated
+
+        # STAGE 9: status
+        log.info("STAGE 9: Record pipeline run status")
+        if not dry:
+            try:
+                prediction_service.record_run_status(
+                    started,
+                    success=True,
+                    records_processed=metrics["records_processed"],
+                    predictions_generated=predictions_generated,
+                )
+            except Exception as e:
+                # Success path: do not fail the run just because status logging failed,
+                # but make it very visible in the logs.
+                log.error("STAGE 9: Failed to record SUCCESS status: %s", _sanitize(str(e)))
+
+        log.info("=" * 70)
+        log.info("PIPELINE COMPLETE ✅")
+        log.info("=" * 70)
+        return 0
+
+    except PipelineError as pe:
+        log.error("=" * 70)
+        log.error("PIPELINE FAILED at STAGE [%s]", pe.stage)
+        log.error("Reason: %s", _sanitize(str(pe)))
+        log.error(traceback.format_exc())
+        _record_failure(started, pe, metrics)
+        return 1
+    except Exception as e:
+        log.error("=" * 70)
+        log.error("PIPELINE FAILED (unexpected error)")
+        log.error("Reason: %s", _sanitize(str(e)))
+        log.error(traceback.format_exc())
+        _record_failure(started, e, metrics)
+        return 1
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    sys.exit(main())

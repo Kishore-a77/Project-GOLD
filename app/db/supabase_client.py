@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from supabase import Client, create_client
 import psycopg2
 from psycopg2.extensions import connection
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 # Load .env variables
 load_dotenv()
@@ -56,7 +56,11 @@ def get_supabase_client(use_service_role: bool = False) -> Client:
 supabase = get_supabase_client(use_service_role=False)
 
 # Admin supabase client (uses service_role key to bypass RLS)
-supabase_admin = get_supabase_client(use_service_role=True)
+def get_supabase_admin() -> Client:
+    """
+    Returns a Supabase client with service_role privileges.
+    """
+    return get_supabase_client(use_service_role=True)
 
 def get_postgres_connection() -> connection:
     """
@@ -99,6 +103,44 @@ def test_connections():
     except Exception as e:
         print(f"[ERROR] PostgreSQL connection failed: {e}")
     print("====================================")
+
+def ensure_schema(sql_path: str = None) -> bool:
+    """
+    Create required tables if they do not exist (idempotent).
+
+    This uses the direct PostgreSQL connection (DATABASE_URL), which bypasses
+    Row-Level Security, so it is the most reliable way to bootstrap the schema.
+    Returns True if it ran, False if DATABASE_URL is unavailable (in which case
+    the tables must already exist in Supabase).
+    """
+    if engine is None:
+        print("[WARN] DATABASE_URL not set; skipping schema bootstrap. "
+              "Tables must already exist in Supabase.")
+        return False
+
+    if sql_path is None:
+        sql_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "database", "supabase_schema.sql"
+        )
+
+    if not os.path.exists(sql_path):
+        print(f"[WARN] Schema file not found: {sql_path}; skipping bootstrap.")
+        return False
+
+    with open(sql_path, "r") as f:
+        sql = f.read()
+
+    statements = [s.strip() for s in sql.split(";") if s.strip()]
+
+    with engine.connect() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
+        conn.commit()
+
+    print(f"[OK] Schema ensured from {sql_path} ({len(statements)} statements)")
+    return True
+
 
 if __name__ == "__main__":
     test_connections()

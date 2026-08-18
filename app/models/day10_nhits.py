@@ -36,8 +36,8 @@ def load_processed_data_supabase() -> pd.DataFrame:
         """
         SELECT
             date,
-            gold_close AS "GOLD_CLOSE"
-        FROM features
+            close AS "GOLD_CLOSE"
+        FROM gold_prices
         ORDER BY date
         """,
         engine

@@ -1,36 +1,19 @@
-# Core Data Processing
-numpy
-pandas
-scikit-learn
+# Streamlit Dashboard Dependencies
+# Minimal set for the prediction consumer dashboard on Streamlit Community Cloud
 
-# Deep Learning
-torch
-torchvision
-torchaudio
+# Core
+streamlit>=1.24.0
 
-# Time Series Forecasting
-u8darts[torch]
-chronos-forecasting
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
 
 # Visualization
-matplotlib
-plotly
-
-# Dashboard
-streamlit
+plotly>=5.15.0
 
 # Database
-sqlalchemy>=2.0
-psycopg2-binary>=2.9
 supabase>=2.0
-python-dotenv
+python-dotenv>=1.0.0
 
-# HTTP Requests
-requests
-
-# Technical Indicators
-ta>=0.11
-
-# Jupyter (optional)
-jupyter
-ipykernel
+# HTTP requests (for FX rate API)
+requests>=2.31.0

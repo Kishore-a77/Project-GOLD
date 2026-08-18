@@ -15,7 +15,15 @@ data/
 
 # Environment
 .env
+.streamlit/secrets.toml
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Model artifacts - ignore large checkpoint/training files
+*.ckpt
+*.pth
+*.pt
+*.h5
+*.tensorflowmodel
