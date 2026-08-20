@@ -2,7 +2,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from app.db.supabase_client import engine
+from app.db.supabase_client import get_supabase_client
 
 # Darts
 from darts import TimeSeries
@@ -32,19 +32,33 @@ MIN_REQUIRED_ROWS = INPUT_LEN + VAL_LEN + TEST_LEN + 5
 # SUPABASE DATA LOADER
 # ---------------------------------------------------------
 def load_processed_data_supabase() -> pd.DataFrame:
-    df = pd.read_sql(
-        """
-        SELECT
-            date,
-            close AS "GOLD_CLOSE"
-        FROM gold_prices
-        ORDER BY date
-        """,
-        engine
-    )
+    client = get_supabase_client(use_service_role=True)
+    rows = []
+    start = 0
+    page_size = 1000
+    while True:
+        end = start + page_size - 1
+        response = (
+            client.table("gold_features")
+            .select("date, close")
+            .order("date")
+            .range(start, end)
+            .execute()
+        )
+        page = response.data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("No rows found in `gold_features`. Run feature engineering first.")
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
+    df = df.rename(columns={"close": "GOLD_CLOSE"})
+    df = df[["date", "GOLD_CLOSE"]]
     return df
 
 

@@ -35,7 +35,17 @@ log = logging.getLogger("prediction_service")
 # Credentials are read from the environment (never hard-coded).
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+# Backend pipeline writes must bypass Row-Level Security, so prefer the
+# service_role key over the anon key. Without it, writes to any RLS-protected
+# table (predictions, pipeline_runs) fail with 401 / 42501.
+if not SUPABASE_SERVICE_KEY:
+    log.warning(
+        "SUPABASE_SERVICE_KEY not set; falling back to anon key. "
+        "Writes to RLS-protected tables (predictions, pipeline_runs) will fail."
+    )
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_KEY)
 
 MODEL_VERSION = "chronos-t5-small + nhits_vfinal"
 
@@ -44,9 +54,30 @@ MODEL_VERSION = "chronos-t5-small + nhits_vfinal"
 # LOAD MODEL-READY DATA
 # -------------------------------------------------
 def fetch_gold_series():
-    """Load the gold close series (model-ready data) from Supabase."""
-    response = supabase.table("gold_prices").select("date, close").order("date").execute()
-    df = pd.DataFrame(response.data)
+    """Load the gold close series (model-ready data) from Supabase.
+
+    Paginates past PostgREST's default 1000-row cap so this always returns
+    the full history, not just the oldest 1000 rows.
+    """
+    PAGE_SIZE = 1000
+    rows = []
+    start = 0
+    while True:
+        end = start + PAGE_SIZE - 1
+        response = (
+            supabase.table("gold_prices")
+            .select("date, close")
+            .order("date")
+            .range(start, end)
+            .execute()
+        )
+        page = response.data or []
+        rows.extend(page)
+        if len(page) < PAGE_SIZE:
+            break
+        start += PAGE_SIZE
+
+    df = pd.DataFrame(rows)
     if df.empty:
         raise RuntimeError("No rows found in `gold_prices`. Run data ingestion first.")
 
@@ -56,6 +87,7 @@ def fetch_gold_series():
     df = df.dropna(subset=["close"])
     if df.empty:
         raise RuntimeError("`gold_prices` contains no usable close values.")
+    log.info("Loaded %d gold rows (paginated)", len(df))
     return df
 
 
