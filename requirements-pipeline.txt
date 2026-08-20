@@ -17,22 +17,14 @@ torchaudio==2.9.1
 u8darts[torch]==0.39.0
 chronos-forecasting==2.2.0
 
-# Visualization
-matplotlib==3.8.2
-plotly==5.22.0
-
 # Database
-sqlalchemy>=2.0
-psycopg2-binary>=2.9
-supabase>=2.0
-python-dotenv
+sqlalchemy==2.0.51
+psycopg2-binary==2.9.12
+supabase==2.31.0
+python-dotenv==1.2.1
 
 # HTTP Requests
-requests
+requests==2.32.5
 
 # Technical Indicators
-ta>=0.11
-
-# Jupyter (optional)
-jupyter
-ipykernel
+ta==0.11.0
