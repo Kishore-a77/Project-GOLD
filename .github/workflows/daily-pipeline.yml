@@ -1,0 +1,42 @@
+name: Daily Prediction Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Pipeline log verbosity"
+        required: false
+        default: "INFO"
+        type: choice
+        options:
+          - DEBUG
+          - INFO
+          - WARNING
+
+jobs:
+  daily-pipeline:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pipeline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-pipeline.txt
+          if [ -d "chronos-forecasting" ]; then
+            pip install -e chronos-forecasting
+          fi
+
+      - name: Run daily prediction pipeline
+        run: |
+          python run_daily_pipeline.py

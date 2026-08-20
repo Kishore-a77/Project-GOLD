@@ -3,19 +3,19 @@
 # Includes all ML/model dependencies not needed by the dashboard
 
 # Core Data Processing
-numpy==1.26.4
-pandas==2.2.2
-yfinance==0.2.40
-scikit-learn==1.5.2
+numpy==2.3.5
+pandas==2.3.3
+yfinance==1.0
+scikit-learn==1.8.0
 
 # Deep Learning
-torch==2.4.0
-torchvision==0.19.0
-torchaudio==2.4.0
+torch==2.9.1
+torchvision==0.24.1
+torchaudio==2.9.1
 
 # Time Series Forecasting
-u8darts[torch]==0.5.0
-chronos-forecasting==0.3.0
+u8darts[torch]==0.39.0
+chronos-forecasting==2.2.0
 
 # Visualization
 matplotlib==3.8.2
