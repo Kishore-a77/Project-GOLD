@@ -9,7 +9,7 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 
 - **🔮 Multi-Horizon Forecasting**: Predict next day, week, month, and up to 5 years
 - **🤖 Ensemble AI Models**: Combines Chronos-T5 (foundation model) + N-HiTS (deep hierarchical model)
-- **💰 Zero Operational Cost**: SQLite-based pipeline with automated scheduling
+- **💰 Low Operational Cost**: Supabase-backed pipeline with automated scheduling
 - **📊 Interactive Dashboard**: Streamlit interface with weight customization
 - **🔄 Automated Updates**: Daily predictions via OS scheduling
 - **📈 Investor-Focused**: Custom weight calculations (grams to price conversion)
@@ -21,7 +21,7 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 ┌─────────────────────────────────────────────────────────────┐
 │                    DATA PIPELINE                            │
 │  ┌───────────┐    ┌───────────┐    ┌──────────────────┐   │
-│  │ Yahoo     │    │ Feature   │    │ SQLite Database  │   │
+│  │ Yahoo     │    │ Feature   │    │ Supabase         │   │
 │  │ Finance   │───▶│ Engineering│───▶│ (gold_data.db)  │   │
 │  │ API       │    │ Pipeline  │    │                  │   │
 │  └───────────┘    └───────────┘    └──────────────────┘   │
@@ -57,7 +57,7 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 | **Adaptability** | Fixed patterns | Learns regime changes |
 | **Horizon** | Limited short-term | 1 day to 5 years |
 | **Feature Engineering** | Extensive required | Minimal, learns from raw data |
-| **Production Cost** | High compute | **Zero cost** (SQLite + scheduling) |
+| **Production Cost** | High compute | **Low cost** (Supabase + scheduling) |
 | **Update Frequency** | Manual retraining | **Fully automated daily** |
 
 ## 📊 Performance Metrics
@@ -70,10 +70,73 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 
 *Tested on 2023-2024 out-of-sample data*
 
+## Production Deployment Architecture
+
+```text
+Local development:  daily pipeline → Supabase → Streamlit dashboard
+Future production:  scheduled pipeline → Supabase → deployed Streamlit dashboard
+```
+
+Pipeline entry point:
+
+```bash
+python -m app.run_daily_pipeline
+```
+
+Dashboard entry point:
+
+```bash
+streamlit run app/views/dashboard.py
+```
+
+The pipeline writes gold data, features, predictions, and pipeline-run status
+to Supabase. The dashboard is a read-only consumer of Supabase. Local `.env`
+loading is supported for development; cloud deployments should provide the
+same variables through environment configuration or a secret manager.
+
+The daily pipeline loads the promoted N-HiTS artifact for inference; it does
+not retrain the model. The separate weekly training entry point retrains,
+evaluates, and records promoted model metadata.
+
+The canonical production pipeline command is `python -m app.run_daily_pipeline`.
+The root `run_daily_pipeline.py` and scripts under `automation/` and
+`data_pipeline/` are retained for compatibility or training workflows, but
+are not additional daily production entry points.
+
+Before cloud deployment, model-artifact distribution and the heavy CPU
+dependency set must be resolved. N-HiTS artifacts currently live under
+`models/nhits_model/`, while Chronos downloads pretrained weights at runtime.
+
+## Automated Daily Pipeline
+
+The daily inference pipeline is automated through GitHub Actions using
+`.github/workflows/daily_pipeline.yml`:
+
+```text
+GitHub Actions → python -m app.run_daily_pipeline → Supabase → Streamlit dashboard
+```
+
+It runs daily at 08:00 IST and supports `workflow_dispatch` for manual runs
+and emergency reruns. Configure these repository secrets before enabling the
+workflow:
+
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+- `SUPABASE_SERVICE_KEY`
+
+The workflow uses Python 3.11, `requirements-pipeline.txt`, the tracked
+N-HiTS artifact, and a cache for Chronos pretrained weights. `DATABASE_URL` is
+not required for normal daily execution because the Supabase schema is already
+provisioned; it is only needed for schema bootstrap or maintenance tasks.
+
+View execution output under GitHub → Actions → Project GOLD Daily Pipeline.
+The workflow prevents overlapping scheduled and manual runs. Streamlit
+dashboard deployment remains a future phase and is not configured here.
+
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.11 (the supported project runtime; Python 3.13 may remain installed locally)
 - Git
 
 ### Installation
@@ -91,24 +154,24 @@ venv\Scripts\activate
 # Activate (Mac/Linux)
 source venv/bin/activate
 
-# Install dependencies
+# Install dashboard dependencies locally
 pip install -r requirements.txt
 
-# Initialize database with historical data
-python scripts/ingest_gold_history_sqlite.py
-python scripts/build_features_sqlite.py
+# Install pipeline dependencies when running inference locally
+pip install -r requirements-pipeline.txt
 
-# Train initial models
-python app/models/day10_nhits.py
-
-# Generate ensemble predictions
-python app/models/ensemble_model.py
+# Run the canonical daily pipeline
+python -m app.run_daily_pipeline
 ```
 
 ### Launch Dashboard
 ```bash
 streamlit run app/views/dashboard.py
 ```
+
+> The legacy SQLite/Snowflake files shown in older examples are retained for
+> compatibility and research only. They are not part of the active daily
+> pipeline. Supabase is the operational database.
 
 ## 📈 Using the Dashboard
 
@@ -118,7 +181,7 @@ streamlit run app/views/dashboard.py
 - Real-time price calculation for custom weights
 
 ### 2. **Select Forecast Horizon**
-- **Preset Modes**: Next Day, Week, Month, 1 Year, 5 Years
+- **Preset Modes**: Next Day, 7 Days, 30 Days, 90 Days, 180 Days, 1 Year
 - **Custom Mode**: Specify exact days, months, years
 
 ### 3. **Interactive Features**
@@ -218,7 +281,7 @@ python app/models/ensemble_model.py
 
 2. **Technical Constraints**
    - Daily frequency only (no intraday)
-   - SQLite suitable for moderate data volumes
+   - Supabase is the active operational database
    - Requires internet for FX rate updates
 
 3. **Accuracy Expectations**
@@ -263,7 +326,6 @@ We welcome contributions! Here's how:
 
 ### Technical Stack
 - [Streamlit Documentation](https://docs.streamlit.io/)
-- [SQLite with Python](https://docs.python.org/3/library/sqlite3.html)
 - [Plotly Graphing Library](https://plotly.com/python/)
 
 ## 🏆 Why Project GOLD Stands Out

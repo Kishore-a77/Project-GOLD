@@ -158,9 +158,15 @@ def train_nhits(ts: TimeSeries):
 # ---------------------------------------------------------
 # PREDICT
 # ---------------------------------------------------------
-def predict_nhits(model, ts, scaler):
+def predict_nhits(model, ts, scaler, horizon_days=PRED_LEN):
 
-    forecast = model.predict(n=PRED_LEN, series=ts)
+    if horizon_days < 1:
+        raise ValueError("horizon_days must be positive")
+
+    # Darts performs the required multi-step rollout when n exceeds the
+    # training output chunk. This produces model-generated values rather than
+    # padding a 30-day forecast with the final prediction.
+    forecast = model.predict(n=horizon_days, series=ts)
     arr = forecast.all_values().reshape(-1, 1)
 
     inv = scaler.inverse_transform(arr).reshape(-1)
@@ -168,7 +174,10 @@ def predict_nhits(model, ts, scaler):
     return {
         "next_day": float(inv[0]),
         "next_week": inv[:7].tolist(),
-        "next_month": inv[:30].tolist()
+        "next_month": inv[:30].tolist(),
+        "next_90d": inv[:90].tolist(),
+        "next_180d": inv[:180].tolist(),
+        "next_365d": inv[:365].tolist(),
     }
 
 
@@ -202,7 +211,7 @@ def main_train_and_predict():
         f"RMSE={rmse(actual_series, pred_series):.4f}"
     )
 
-    preds = predict_nhits(model, ts, scaler)
+    preds = predict_nhits(model, ts, scaler, PRED_LEN)
 
     last_date = df.index.max()
     future_index = pd.date_range(
@@ -226,7 +235,7 @@ def main_train_and_predict():
 # ---------------------------------------------------------
 # INFERENCE ONLY (USED BY ENSEMBLE)
 # ---------------------------------------------------------
-def inference_only():
+def inference_only(horizon_days=365):
     df = load_processed_data_supabase()
     df = prepare_dataframe(df)
 
@@ -240,7 +249,7 @@ def inference_only():
         )
 
     model = NHiTSModel.load(str(model_path))
-    return predict_nhits(model, ts, scaler)
+    return predict_nhits(model, ts, scaler, horizon_days)
 
 
 # ---------------------------------------------------------

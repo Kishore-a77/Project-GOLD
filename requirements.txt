@@ -2,18 +2,18 @@
 # Minimal set for the prediction consumer dashboard on Streamlit Community Cloud
 
 # Core
-streamlit>=1.24.0
+streamlit==1.50.0
 
 # Data processing
-pandas>=2.0.0
-numpy>=1.24.0
+pandas==2.3.2
+numpy==2.2.6
 
 # Visualization
-plotly>=5.15.0
+plotly==6.5.0
 
 # Database
-supabase>=2.0
-python-dotenv>=1.0.0
+supabase==2.31.0
+python-dotenv==1.1.1
 
 # HTTP requests (for FX rate API)
-requests>=2.31.0
+requests==2.32.5

@@ -48,6 +48,7 @@ if not SUPABASE_SERVICE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_KEY)
 
 MODEL_VERSION = "chronos-t5-small + nhits_vfinal"
+FORECAST_HORIZON_DAYS = 365
 
 
 # -------------------------------------------------
@@ -112,6 +113,10 @@ def run_chronos_prediction(series_values, horizon_days=30):
         raise ValueError(
             "Chronos produced non-finite (NaN/inf) predictions; refusing to proceed."
         )
+    log.info(
+        "Chronos forecast: requested=%d shape=%s first=%.4f last=%.4f unique=%d min=%.4f max=%.4f",
+        horizon_days, arr.shape, arr[0], arr[-1], len(np.unique(arr)), arr.min(), arr.max()
+    )
     return arr.tolist()
 
 
@@ -122,17 +127,32 @@ def run_nhits_prediction(horizon_days=30):
     """Run N-HiTS inference using the existing trained artifact (inference only)."""
     from app.models.day10_nhits import inference_only as run_nhits_inference
     try:
-        preds = run_nhits_inference()  # dict: next_day / next_week / next_month
+        preds = run_nhits_inference(horizon_days)
     except Exception as e:
         raise RuntimeError(f"N-HiTS inference failed to load/run: {e}") from e
-    series = list(preds["next_month"])
+    key = f"next_{horizon_days}d"
+    if horizon_days == 1:
+        key = "next_day"
+    elif horizon_days == 7:
+        key = "next_week"
+    elif horizon_days == 30:
+        key = "next_month"
+    series = list(preds.get(key, []))
     if len(series) < horizon_days:
-        series = series + [series[-1]] * (horizon_days - len(series))
+        raise RuntimeError(
+            f"N-HiTS returned {len(series)} values for {horizon_days}-day forecast; "
+            "refusing to pad a long-horizon forecast."
+        )
     series = [float(x) for x in series[:horizon_days]]
     if not np.all(np.isfinite(series)):
         raise ValueError(
             "N-HiTS produced non-finite (NaN/inf) predictions; refusing to proceed."
         )
+    arr = np.asarray(series, dtype=float)
+    log.info(
+        "N-HiTS forecast: requested=%d shape=%s first=%.4f last=%.4f unique=%d min=%.4f max=%.4f",
+        horizon_days, arr.shape, arr[0], arr[-1], len(np.unique(arr)), arr.min(), arr.max()
+    )
     return series
 
 
@@ -143,8 +163,8 @@ def compute_ensemble(chronos_30, nhits_30):
     # Lightweight import (no torch/darts/psycopg2) so this module stays testable.
     from services.ensemble_logic import combine, WEIGHTS
 
-    chronos_30 = list(chronos_30)[:30]
-    nhits_30 = list(nhits_30)[:30]
+    chronos_30 = list(chronos_30)
+    nhits_30 = list(nhits_30)
     if len(chronos_30) < 30 or len(nhits_30) < 30:
         raise ValueError("Forecast length < 30; cannot build ensemble.")
     if not (np.all(np.isfinite(chronos_30)) and np.all(np.isfinite(nhits_30))):
@@ -158,6 +178,11 @@ def compute_ensemble(chronos_30, nhits_30):
         "next_week": combine(chronos_30[:7], nhits_30[:7], *WEIGHTS["next_week"])[:7],
         "next_month": combine(chronos_30[:30], nhits_30[:30], *WEIGHTS["next_month"])[:30],
     }
+    for key, length in (("next_90d", 90), ("next_180d", 180), ("next_365d", 365)):
+        if len(chronos_30) >= length and len(nhits_30) >= length:
+            ensemble[key] = combine(
+                chronos_30[:length], nhits_30[:length], *WEIGHTS["next_month"]
+            )[:length]
     return ensemble
 
 
@@ -187,9 +212,13 @@ def save_predictions(ensemble, chronos_30, nhits_30, last_date, model_version=MO
             "Refusing to persist non-finite (NaN/inf) ensemble predictions. "
             "Previous valid predictions are preserved."
         )
-    if len(ensemble["next_week"]) < 7 or len(ensemble["next_month"]) < 30:
+    required = {"next_week": 7, "next_month": 30}
+    for key, length in required.items():
+        if len(ensemble.get(key, [])) < length:
+            raise ValueError(f"Ensemble horizon {key} is incomplete.")
+    if "next_365d" in ensemble and len(ensemble["next_365d"]) < 365:
         raise ValueError(
-            "Ensemble horizons are incomplete; refusing to persist partial predictions."
+            "365-day ensemble is incomplete; refusing to persist partial predictions."
         )
 
     last_date = pd.to_datetime(last_date)
@@ -199,6 +228,9 @@ def save_predictions(ensemble, chronos_30, nhits_30, last_date, model_version=MO
         ("7d", ensemble["next_week"], chronos_30[:7], nhits_30[:7]),
         ("30d", ensemble["next_month"], chronos_30[:30], nhits_30[:30]),
     ]
+    for horizon, key, length in (("90d", "next_90d", 90), ("180d", "next_180d", 180), ("365d", "next_365d", 365)):
+        if key in ensemble:
+            specs.append((horizon, ensemble[key], chronos_30[:length], nhits_30[:length]))
 
     records = []
     for horizon, ens, ch, nh in specs:
@@ -219,7 +251,8 @@ def save_predictions(ensemble, chronos_30, nhits_30, last_date, model_version=MO
     if not records:
         raise RuntimeError("No prediction records were produced.")
 
-    supabase.table("predictions").upsert(records).execute()
+    supabase.table("predictions").upsert(records, on_conflict="date,horizon").execute()
+    log.info("Saved/updated %d prediction records to Supabase.", len(records))
     return len(records)
 
 
@@ -298,9 +331,9 @@ def run_prediction_pipeline(dry_run=False, model_version=MODEL_VERSION):
         nhits_30 = mock_forecast(series, 30)
     else:
         log.info("  STAGE 6: Chronos-T5 inference")
-        chronos_30 = run_chronos_prediction(series, 30)
+        chronos_30 = run_chronos_prediction(series, FORECAST_HORIZON_DAYS)
         log.info("  STAGE 7: N-HiTS inference")
-        nhits_30 = run_nhits_prediction(30)
+        nhits_30 = run_nhits_prediction(FORECAST_HORIZON_DAYS)
 
     log.info("  STAGE 8: Ensemble (Chronos-T5 + N-HiTS)")
     ensemble = compute_ensemble(chronos_30, nhits_30)

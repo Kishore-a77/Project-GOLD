@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 import requests
 from supabase import create_client
 import os
+import logging
 
 # -------------------------------------------------
 # PATH FIX
@@ -41,11 +42,13 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     st.stop()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+logger = logging.getLogger("gold_dashboard")
 
 # -------------------------------------------------
 # CONFIG
 # -------------------------------------------------
 MAX_YEARS = 5
+PAGE_SIZE = 1000  # PostgREST default page size
 
 st.set_page_config(
     page_title="Gold Price Forecast — Ensemble",
@@ -66,6 +69,15 @@ st.markdown("""
 # -------------------------------------------------
 TROY_OUNCE_TO_GRAMS = 31.1035
 DEFAULT_WEIGHT_GRAMS = 8.0
+
+HORIZON_MAPPING = {
+    "Next Day": "1d",
+    "7 Days": "7d",
+    "30 Days": "30d",
+    "90 Days": "90d",
+    "180 Days": "180d",
+    "1 Year": "365d",
+}
 
 # -------------------------------------------------
 # FX RATE
@@ -89,52 +101,135 @@ def convert_usd_per_oz_to_inr_per_gram(usd_per_oz, usd_inr_rate, weight_grams=1.
     return inr_per_gram * weight_grams
 
 # -------------------------------------------------
-# SUPABASE LOADERS
+# SUPABASE LOADERS WITH PAGINATION
 # -------------------------------------------------
+def _fetch_all_rows(table, select_cols, order_col, filters=None, page_size=PAGE_SIZE):
+    """
+    Fetch ALL rows from a Supabase table using pagination.
+    
+    Args:
+        table: Table name (string)
+        select_cols: Columns to select (string, comma-separated)
+        order_col: Column to order by (string)
+        filters: Dict of filter conditions {col: value} for .eq() filters
+        page_size: Number of rows per page
+    
+    Returns:
+        List of all records (dicts)
+    """
+    all_rows = []
+    start = 0
+    while True:
+        end = start + page_size - 1
+        query = supabase.table(table).select(select_cols).order(order_col).range(start, end)
+        
+        if filters:
+            for col, val in filters.items():
+                query = query.eq(col, val)
+        
+        response = query.execute()
+        page = response.data or []
+        all_rows.extend(page)
+        
+        if len(page) < page_size:
+            break
+        start += page_size
+    
+    return all_rows
 
-@st.cache_data(ttl=3600)
+
+def _as_naive_datetime(values):
+    """Normalize Supabase date/timestamp values for reliable comparisons."""
+    converted = pd.to_datetime(values, errors="coerce", utc=True)
+    if isinstance(converted, pd.DatetimeIndex):
+        return converted.tz_localize(None)
+    return converted.dt.tz_localize(None)
+
+
+@st.cache_data(ttl=300)
 def load_actuals():
-    """Fetch historical gold prices from Supabase."""
+    """Fetch ALL historical gold prices from Supabase with pagination."""
     try:
-        response = supabase.table('gold_prices').select('date, close').order('date').execute()
-        df = pd.DataFrame(response.data)
+        rows = _fetch_all_rows('gold_prices', 'date, close', 'date')
+        df = pd.DataFrame(rows)
         if df.empty:
             return pd.DataFrame(columns=["date", "GOLD_CLOSE"])
-        df["date"] = pd.to_datetime(df["date"])
+        df["date"] = _as_naive_datetime(df["date"])
         df = df.rename(columns={"close": "GOLD_CLOSE"})
+        df["GOLD_CLOSE"] = pd.to_numeric(df["GOLD_CLOSE"], errors="coerce")
+        df = (df.dropna(subset=["date", "GOLD_CLOSE"])
+                .drop_duplicates(subset=["date"])
+                .sort_values("date")
+                .reset_index(drop=True))
         return df.set_index("date")
     except Exception as e:
         st.error(f"❌ Error loading gold_prices: {str(e)}")
         return pd.DataFrame(columns=["date", "GOLD_CLOSE"])
 
 
-@st.cache_data(ttl=3600)
-def load_ensemble_forecast(horizon='30d'):
-    """Fetch ensemble predictions from Supabase."""
+@st.cache_data(ttl=300)
+def load_ensemble_forecast(horizon='30d', latest_historical_date=None):
+    """Fetch ensemble predictions from Supabase with pagination."""
     try:
-        response = (supabase.table('predictions')
-                    .select('date, ensemble_pred, chronos_pred, nhits_pred, model_version')
-                    .eq('horizon', horizon)
-                    .order('date')
-                    .execute())
-        df = pd.DataFrame(response.data)
+        rows = _fetch_all_rows('predictions', 'date, ensemble_pred, chronos_pred, nhits_pred, model_version', 'date', filters={'horizon': horizon})
+        df = pd.DataFrame(rows)
         if df.empty:
-            return pd.DataFrame(columns=["date", "ENSEMBLE_PRED", "CHRONOS_PRED", "NHITS_PRED", "MODEL_VERSION"])
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.rename(columns={"ensemble_pred": "ENSEMBLE_PRED"})
-        return df.set_index("date")
+            empty = pd.DataFrame(columns=["date", "ensemble_pred", "chronos_pred", "nhits_pred", "model_version"])
+            return empty, None
+        df["date"] = _as_naive_datetime(df["date"])
+        # Keep the database schema names throughout the dashboard. Supabase
+        # returns these fields in lowercase; renaming only one field caused
+        # Keep all three prediction fields in the database's lowercase form.
+        for column in ["ensemble_pred", "chronos_pred", "nhits_pred"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        df = (df.dropna(subset=["date", "ensemble_pred"])
+                .drop_duplicates(subset=["date"])
+                .sort_values("date")
+                .reset_index(drop=True))
+
+        # A prediction row is only usable for this dashboard when it follows
+        # the currently loaded historical data. This excludes old forecast
+        # batches when the predictions table contains multiple daily runs.
+        if latest_historical_date is not None:
+            cutoff = pd.Timestamp(latest_historical_date)
+            df = df[df["date"] > cutoff].reset_index(drop=True)
+        logger.info(
+            "Prediction load: database horizon=%s rows=%d columns=%s",
+            horizon, len(df), list(df.columns)
+        )
+        return df.set_index("date"), None
     except Exception as e:
         st.error(f"❌ Error loading predictions: {str(e)}")
-        return pd.DataFrame(columns=["date", "ENSEMBLE_PRED", "CHRONOS_PRED", "NHITS_PRED", "MODEL_VERSION"])
+        logger.exception("Prediction query failed for horizon %s", horizon)
+        empty = pd.DataFrame(columns=["date", "ensemble_pred", "chronos_pred", "nhits_pred", "model_version"])
+        return empty, str(e)
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)
+def load_prediction_inventory():
+    """Return all prediction metadata for diagnostics and horizon availability."""
+    columns = "date, horizon, chronos_pred, nhits_pred, ensemble_pred, model_version"
+    try:
+        rows = _fetch_all_rows("predictions", columns, "date")
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return pd.DataFrame(columns=[name.strip() for name in columns.split(",")]), None
+        df["date"] = _as_naive_datetime(df["date"])
+        for column in ["chronos_pred", "nhits_pred", "ensemble_pred"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df.sort_values(["horizon", "date"]).reset_index(drop=True), None
+    except Exception as e:
+        logger.exception("Prediction inventory query failed")
+        return pd.DataFrame(columns=[name.strip() for name in columns.split(",")]), str(e)
+
+
+@st.cache_data(ttl=60)
 def load_latest_pipeline_run():
     """Load the latest pipeline run (regardless of status)."""
     try:
         response = supabase.table('pipeline_runs')\
             .select('*')\
-            .order('started_at', descending=True)\
+            .order('started_at', desc=True)\
             .limit(1)\
             .execute()
         df = pd.DataFrame(response.data)
@@ -147,14 +242,14 @@ def load_latest_pipeline_run():
     return None
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=60)
 def load_last_successful_pipeline_run():
     """Load the last successful pipeline run."""
     try:
         response = supabase.table('pipeline_runs')\
             .select('*')\
             .eq('status', 'success')\
-            .order('started_at', descending=True)\
+            .order('started_at', desc=True)\
             .limit(1)\
             .execute()
         df = pd.DataFrame(response.data)
@@ -167,7 +262,7 @@ def load_last_successful_pipeline_run():
     return None
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def load_latest_gold_price_date():
     """Get the most recent date available in gold_prices."""
     try:
@@ -183,17 +278,20 @@ def load_latest_gold_price_date():
     return None
 
 
-@st.cache_data(ttl=3600)
-def load_latest_prediction_date():
-    """Get the most recent date available in predictions."""
+@st.cache_data(ttl=300)
+def load_latest_prediction_date(latest_historical_date=None):
+    """Get the newest usable prediction date after the actuals cutoff."""
     try:
-        response = supabase.table('predictions')\
-            .select('date')\
-            .order('date', desc=True)\
-            .limit(1)\
-            .execute()
-        if response.data:
-            return pd.to_datetime(response.data[0]['date'])
+        rows = _fetch_all_rows(
+            'predictions', 'date', 'date',
+            filters=None,
+        )
+        dates = _as_naive_datetime(pd.Series([row.get('date') for row in rows]))
+        dates = dates.dropna()
+        if latest_historical_date is not None:
+            dates = dates[dates > pd.Timestamp(latest_historical_date)]
+        if not dates.empty:
+            return dates.max()
     except Exception:
         pass
     return None
@@ -275,7 +373,7 @@ with st.sidebar:
     if mode == "Preset":
         preset = st.selectbox(
             "Select horizon",
-            ["Next Day", "Next Week (7)", "Next Month (30)", "1 Year", "5 Years"]
+            ["Next Day", "7 Days", "30 Days", "90 Days", "180 Days", "1 Year"]
         )
     else:
         years = st.slider("Years", 0, MAX_YEARS, 1)
@@ -291,26 +389,20 @@ with st.spinner("Loading data from Supabase..."):
     latest_run = load_latest_pipeline_run()
     last_successful_run = load_last_successful_pipeline_run()
     model_metadata = load_model_metadata()
-    latest_gold_date = load_latest_gold_price_date()
-    latest_pred_date = load_latest_prediction_date()
+    latest_gold_date = actuals.index.max() if not actuals.empty else None
 
 # Map preset to horizon key
-horizon_map = {
-    "Next Day": "1d",
-    "Next Week (7)": "7d",
-    "Next Month (30)": "30d",
-    "1 Year": "1y",
-    "5 Years": "5y"
-}
-
 if mode == "Preset":
-    horizon_key = horizon_map[preset]
-    horizon_days = {"1d": 1, "7d": 7, "30d": 30, "1y": 365, "5y": 365 * 5}[horizon_key]
+    horizon_key = HORIZON_MAPPING[preset]
+    horizon_days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "180d": 180, "365d": 365}[horizon_key]
 else:
     horizon_days = max(1, min(years * 365 + months * 30 + days, 365 * MAX_YEARS))
     horizon_key = "30d"  # Default to 30d predictions for custom
 
-ensemble = load_ensemble_forecast(horizon_key)
+ensemble, prediction_query_error = load_ensemble_forecast(horizon_key, latest_gold_date)
+prediction_inventory, inventory_error = load_prediction_inventory()
+next_day_ensemble, next_day_query_error = load_ensemble_forecast("1d", latest_gold_date)
+latest_pred_date = load_latest_prediction_date(latest_gold_date)
 
 # -------------------------------------------------
 # SYSTEM STATUS
@@ -362,9 +454,16 @@ if actuals.empty:
     st.stop()
 
 # Check if we have predictions for the selected horizon
-if ensemble.empty and horizon_key in ['1d', '7d', '30d']:
-    st.warning(f"⚠️ No predictions found for horizon '{horizon_key}'. The latest pipeline may not have generated forecasts for this horizon.")
-    # Don't stop - show historical data and use recursive forecast as fallback
+if not prediction_query_error and ensemble.empty and horizon_key in ['1d', '7d', '30d', '90d', '180d', '365d']:
+    st.warning(
+        f"{horizon_days}-day forecast is not currently available. "
+        "Run the forecasting pipeline after enabling this horizon."
+    )
+elif not prediction_query_error and len(ensemble) < horizon_days and horizon_days > 30:
+    st.warning(
+        f"{horizon_days}-day forecast incomplete: {len(ensemble)}/{horizon_days} points available. "
+        "Missing values were not padded or forward-filled."
+    )
 
 # -------------------------------------------------
 # CONVERT ACTUALS
@@ -376,41 +475,89 @@ actuals["GOLD_CLOSE_CONVERTED"] = actuals["GOLD_CLOSE"].apply(
 # -------------------------------------------------
 # CONVERT FORECASTS
 # -------------------------------------------------
-if "ENSEMBLE_PRED" in ensemble.columns and not ensemble.empty:
-    ensemble["ENSEMBLE_PRED_CONVERTED"] = ensemble["ENSEMBLE_PRED"].apply(
+if "ensemble_pred" in ensemble.columns and not ensemble.empty:
+    ensemble["ensemble_pred_converted"] = ensemble["ensemble_pred"].apply(
         lambda x: convert_usd_per_oz_to_inr_per_gram(x, usd_inr, weight_grams)
     )
 else:
-    ensemble["ENSEMBLE_PRED_CONVERTED"] = pd.Series([], dtype=float)
+    ensemble["ensemble_pred_converted"] = pd.Series([], dtype=float)
 
 # -------------------------------------------------
 # FORECAST
 # -------------------------------------------------
-fallback_usd_per_oz = actuals["GOLD_CLOSE"].iloc[-1]
+latest_historical_date = actuals.index.max()
+forecast_available = not prediction_query_error and len(ensemble) > 0
+if forecast_available or horizon_days <= 30:
+    fallback_usd_per_oz = actuals["GOLD_CLOSE"].iloc[-1]
+    if horizon_days > 30:
+        # Long horizons use only rows actually returned by the model/database.
+        # Missing rows remain missing; they are never padded or extrapolated.
+        future_preds_usd_per_oz = ensemble["ensemble_pred"].tolist()
+    else:
+        future_preds_usd_per_oz = recursive_forecast(
+            ensemble["ensemble_pred"].tolist() if "ensemble_pred" in ensemble.columns and not ensemble.empty else [],
+            horizon_days,
+            fallback_value=fallback_usd_per_oz,
+            historical_prices=actuals["GOLD_CLOSE"].tolist()
+        )
+    future_preds_inr = [
+        convert_usd_per_oz_to_inr_per_gram(pred, usd_inr, weight_grams)
+        for pred in future_preds_usd_per_oz
+    ]
+    if horizon_days > 30 and len(ensemble):
+        future_dates = pd.DatetimeIndex(ensemble.index)
+    elif len(ensemble) >= horizon_days:
+        future_dates = pd.DatetimeIndex(ensemble.index[:horizon_days])
+    else:
+        future_dates = pd.date_range(
+            start=latest_historical_date + timedelta(days=1),
+            periods=horizon_days,
+            freq="D"
+        )
+    if len(future_dates) and future_dates[0] <= latest_historical_date:
+        st.error("Forecast date alignment problem: the first forecast is not after the latest historical date.")
+        forecast_df = pd.DataFrame(columns=["date", "forecast_price"])
+    else:
+        forecast_df = pd.DataFrame(
+            {"forecast_price": future_preds_inr}, index=future_dates
+        ).reset_index().rename(columns={"index": "date"})
+else:
+    forecast_df = pd.DataFrame(columns=["date", "forecast_price"])
 
-future_preds_usd_per_oz = recursive_forecast(
-    ensemble["ENSEMBLE_PRED"].tolist() if "ENSEMBLE_PRED" in ensemble.columns and not ensemble.empty else [],
-    horizon_days,
-    fallback_value=fallback_usd_per_oz,
-    historical_prices=actuals["GOLD_CLOSE"].tolist()
+forecast_df = forecast_df.sort_values("date").reset_index(drop=True)
+forecast_date_duplicates = int(forecast_df["date"].duplicated().sum()) if not forecast_df.empty else 0
+forecast_nan_count = int(forecast_df["forecast_price"].isna().sum()) if not forecast_df.empty else 0
+forecast_invalid_count = 0
+if not forecast_df.empty:
+    forecast_invalid_count = int((~np.isfinite(forecast_df["forecast_price"].astype(float))).sum())
+if forecast_date_duplicates or forecast_nan_count or forecast_invalid_count:
+    st.error(
+        "Invalid forecast data received; the forecast trace was omitted. "
+        f"duplicate_dates={forecast_date_duplicates}, nan={forecast_nan_count}, "
+        f"non_finite={forecast_invalid_count}"
+    )
+    forecast_df = pd.DataFrame(columns=["date", "forecast_price"])
+expected_forecast_length = len(future_dates) if "future_dates" in locals() else 0
+if len(forecast_df) != expected_forecast_length:
+    st.error("Forecast date/value length mismatch; the forecast trace was omitted.")
+    forecast_df = pd.DataFrame(columns=["date", "forecast_price"])
+
+forecast_line_mode = "lines+markers" if 0 < len(forecast_df) <= 30 else "lines"
+selected_ui_horizon = preset if mode == "Preset" else "Custom"
+available_horizons = sorted(prediction_inventory["horizon"].dropna().astype(str).unique().tolist()) if not prediction_inventory.empty else []
+selected_inventory = (
+    prediction_inventory[prediction_inventory["horizon"] == horizon_key]
+    if not prediction_inventory.empty and "horizon" in prediction_inventory.columns
+    else pd.DataFrame()
 )
 
-future_preds_inr = [
-    convert_usd_per_oz_to_inr_per_gram(pred, usd_inr, weight_grams)
-    for pred in future_preds_usd_per_oz
-]
-
-future_dates = pd.date_range(
-    start=actuals.index[-1] + timedelta(days=1),
-    periods=horizon_days,
-    freq="D"
-)
-
-forecast_df = pd.DataFrame(
-    {"forecast_price": future_preds_inr},
-    index=future_dates
-)
-forecast_df = forecast_df.dropna().reset_index().rename(columns={"index": "date"})
+forecast_std = float(forecast_df["forecast_price"].std(ddof=0)) if len(forecast_df) else 0.0
+historical_std = float(actuals["GOLD_CLOSE_CONVERTED"].std(ddof=0))
+if len(forecast_df) >= 2 and horizon_days >= 90 and historical_std > 0 and forecast_std / historical_std < 1e-3:
+    st.warning(
+        f"The {horizon_days}-day forecast has near-zero variance. "
+        "This may indicate model collapse; it was not padded or artificially varied."
+    )
 
 # -------------------------------------------------
 # HISTORICAL DATAFRAME
@@ -418,7 +565,36 @@ forecast_df = forecast_df.dropna().reset_index().rename(columns={"index": "date"
 hist_df = actuals.reset_index().rename(
     columns={"date": "date", "GOLD_CLOSE_CONVERTED": "price"}
 )
-hist_df = hist_df.tail(730)
+
+with st.expander("Data Diagnostics"):
+    st.write(f"Historical rows loaded: {len(hist_df):,}")
+    st.write(f"Historical first date: {hist_df['date'].iloc[0].date()}")
+    st.write(f"Historical latest date: {latest_historical_date.date()}")
+    st.write(f"Prediction rows loaded: {len(ensemble):,}")
+    st.write(f"Prediction latest date: {ensemble.index.max().date() if not ensemble.empty else 'N/A'}")
+    st.write(f"Available horizons: {available_horizons or 'None'}")
+    st.write(f"Selected UI horizon: {selected_ui_horizon}")
+    st.write(f"Selected backend horizon: {horizon_key}")
+    st.write(f"Requested forecast points: {horizon_days}")
+    st.write(f"Available forecast points: {len(ensemble):,}")
+    st.write(f"Prediction range: {selected_inventory['date'].min() if not selected_inventory.empty else 'N/A'} to {selected_inventory['date'].max() if not selected_inventory.empty else 'N/A'}")
+    st.write(f"Chronos valid values: {int(ensemble['chronos_pred'].notna().sum()) if 'chronos_pred' in ensemble else 0}")
+    st.write(f"N-HiTS valid values: {int(ensemble['nhits_pred'].notna().sum()) if 'nhits_pred' in ensemble else 0}")
+    st.write(f"Ensemble valid values: {int(ensemble['ensemble_pred'].notna().sum()) if 'ensemble_pred' in ensemble else 0}")
+    st.write(f"Database horizon: {horizon_key}")
+    st.write(f"Forecast rows: {len(forecast_df):,}")
+    st.write(f"Forecast first date: {forecast_df['date'].iloc[0].date() if not forecast_df.empty else 'N/A'}")
+    st.write(f"Forecast last date: {forecast_df['date'].iloc[-1].date() if not forecast_df.empty else 'N/A'}")
+    st.write(f"Forecast minimum: {forecast_df['forecast_price'].min() if not forecast_df.empty else 'N/A'}")
+    st.write(f"Forecast maximum: {forecast_df['forecast_price'].max() if not forecast_df.empty else 'N/A'}")
+    st.write(f"Forecast unique values: {forecast_df['forecast_price'].nunique() if not forecast_df.empty else 0}")
+    st.write(f"Forecast NaN count: {forecast_nan_count}")
+    st.write(f"Forecast date duplicates: {forecast_date_duplicates}")
+    st.write(f"Forecast line mode: {forecast_line_mode}")
+    st.write(f"Selected gold weight: {weight_grams:g}g")
+    st.write(f"Selected horizon: {horizon_key} ({horizon_days} days)")
+    st.write(f"Latest historical price: ₹ {hist_df['price'].iloc[-1]:,.2f}")
+    st.write(f"First forecast price: ₹ {forecast_df['forecast_price'].iloc[0]:,.2f}" if not forecast_df.empty else "First forecast price: N/A")
 
 # -------------------------------------------------
 # MAIN CHART
@@ -455,10 +631,10 @@ else:
         go.Scatter(
             x=extended_dates,
             y=extended_prices,
-            mode="lines+markers" if len(forecast_df) <= 90 else "lines",
+            mode=forecast_line_mode,
             name=f"Forecast ({weight_grams}g)",
             line=dict(width=3, color="#FFB000"),
-            marker=dict(size=7) if len(forecast_df) <= 90 else None,
+            marker=dict(size=6) if forecast_line_mode == "lines+markers" else None,
             connectgaps=True
         )
     )
@@ -482,13 +658,17 @@ st.plotly_chart(fig, use_container_width=True)
 col1, col2 = st.columns(2)
 
 with col1:
-    if not forecast_df.empty:
-        st.metric(f"Next Day Prediction ({weight_grams}g)", f"₹ {forecast_df.iloc[0]['forecast_price']:,.2f}")
+    if not next_day_query_error and not next_day_ensemble.empty:
+        next_day_usd = float(next_day_ensemble.iloc[0]["ensemble_pred"])
+        next_day_inr = convert_usd_per_oz_to_inr_per_gram(next_day_usd, usd_inr, weight_grams)
+        st.metric(f"Next Day Prediction ({weight_grams}g)", f"₹ {next_day_inr:,.2f}")
     else:
-        if latest_run is not None and latest_run.get('status') == 'failed':
+        if next_day_query_error:
+            st.metric(f"Next Day Prediction ({weight_grams}g)", "N/A - Query error")
+        elif latest_run is not None and latest_run.get('status') == 'failed':
             st.metric(f"Next Day Prediction ({weight_grams}g)", "N/A - Pipeline failed")
         else:
-            st.metric(f"Next Day Prediction ({weight_grams}g)", "N/A")
+            st.metric(f"Next Day Prediction ({weight_grams}g)", "N/A - No prediction available")
 
 with col2:
     st.metric("USD → INR Rate", f"₹ {usd_inr:.2f}")
@@ -528,10 +708,10 @@ if horizon_days > 1 and not forecast_df.empty:
         go.Scatter(
             x=forecast_df["date"],
             y=forecast_df["forecast_price"],
-            mode="lines+markers" if len(forecast_df) <= 90 else "lines",
+            mode=forecast_line_mode,
             name=f"Forecast ({weight_grams}g)",
             line=dict(color="#FFB000", width=4),
-            marker=dict(size=7) if len(forecast_df) <= 90 else None
+            marker=dict(size=6) if forecast_line_mode == "lines+markers" else None
         )
     )
 

@@ -120,7 +120,7 @@ def ensure_schema(sql_path: str = None) -> bool:
 
     if sql_path is None:
         sql_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
             "database", "supabase_schema.sql"
         )
 

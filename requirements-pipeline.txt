@@ -1,6 +1,7 @@
 # Full Pipeline Dependencies
 # Used by GitHub Actions for daily prediction and weekly training pipelines
 # Includes all ML/model dependencies not needed by the dashboard
+# Supported runtime: Python 3.11
 
 # Core Data Processing
 numpy==2.3.5

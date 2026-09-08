@@ -10,23 +10,56 @@ import yfinance as yf
 import pandas as pd
 from supabase import create_client
 from datetime import datetime, timedelta
+from pathlib import Path
+from dotenv import load_dotenv
 
 logger = logging.getLogger("data_fetch_service")
+
+# Load .env from project root BEFORE reading any Supabase config.
+# Resolve project root from this file's location: <project_root>/services/data_fetch_service.py
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(_PROJECT_ROOT / ".env")
 
 # Supabase credentials from environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
+# Validate configuration immediately after loading .env
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL is not set in environment variables.")
+if not SUPABASE_SERVICE_KEY and not SUPABASE_KEY:
+    raise RuntimeError(
+        "Neither SUPABASE_SERVICE_KEY nor SUPABASE_KEY is set in environment variables. "
+        "At least one is required for Supabase authentication."
+    )
+
+# Validate and normalize SUPABASE_URL
+SUPABASE_URL = SUPABASE_URL.strip()
+if SUPABASE_URL.endswith("/"):
+    SUPABASE_URL = SUPABASE_URL.rstrip("/")
+if not (SUPABASE_URL.startswith("http://") or SUPABASE_URL.startswith("https://")):
+    raise RuntimeError(
+        f"SUPABASE_URL must start with http:// or https://, got: {SUPABASE_URL}"
+    )
+
 # Backend pipeline writes must bypass Row-Level Security, so prefer the
 # service_role key over the anon key (this table currently has no RLS policy
 # blocking anon writes, but relying on that is fragile -- if RLS is ever
 # enabled on gold_prices, anon-key writes will start failing with 401/42501).
-if not SUPABASE_SERVICE_KEY:
+_use_service_key = bool(SUPABASE_SERVICE_KEY)
+if not _use_service_key:
     logger.warning(
-        "SUPABASE_SERVICE_KEY not set; falling back to anon key for gold_prices writes."
+        "SUPABASE_SERVICE_KEY not set; falling back to anon key for gold_prices writes. "
+        "If RLS is enabled on gold_prices, writes will fail with 401/42501."
     )
+
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_KEY)
+
+logger.info(
+    "Supabase configuration loaded successfully. Service key: %s",
+    _use_service_key
+)
 
 # How many rows to send to Supabase per upsert call.
 BATCH_SIZE = 500
@@ -111,7 +144,23 @@ def get_latest_date_in_supabase():
         if response.data:
             return pd.to_datetime(response.data[0]['date']).date()
     except Exception as e:
-        logger.error("Could not read latest date from Supabase (gold_prices): %s", e)
+        # Distinguish authentication failures from network/other failures
+        error_msg = str(e)
+        error_type = type(e).__name__
+        
+        # Check for HTTP 401/403 authentication errors
+        if "401" in error_msg or "403" in error_msg or "unauthorized" in error_msg.lower() or "forbidden" in error_msg.lower():
+            logger.error(
+                "Supabase authentication failed (%s): The configured API key does not have "
+                "the required permissions. Ensure SUPABASE_SERVICE_KEY is set and valid for "
+                "backend writes to gold_prices. Error: %s",
+                error_type, error_msg
+            )
+        else:
+            logger.error(
+                "Could not read latest date from Supabase (gold_prices) [%s]: %s",
+                error_type, error_msg
+            )
         raise
     return None
 
@@ -165,9 +214,28 @@ def upsert_gold_data(df, batch_size=BATCH_SIZE):
                 break
             except Exception as e:
                 last_err = e
+                error_msg = str(e)
+                error_type = type(e).__name__
+                
+                # Check for HTTP 401/403 authentication errors - these won't be fixed by retrying
+                if "401" in error_msg or "403" in error_msg or "unauthorized" in error_msg.lower() or "forbidden" in error_msg.lower():
+                    logger.error(
+                        "Supabase authentication failed (%s) for batch rows %d-%d: The configured API key "
+                        "does not have the required permissions for gold_prices upserts. "
+                        "Ensure SUPABASE_SERVICE_KEY is set and valid. Error: %s",
+                        error_type, i, i + len(batch) - 1, error_msg
+                    )
+                    # Auth failures are not retryable - fail immediately
+                    raise RuntimeError(
+                        f"Supabase authentication failed for batch rows {i}-{i + len(batch) - 1}: "
+                        f"The configured API key lacks required permissions. "
+                        f"Ensure SUPABASE_SERVICE_KEY is set and valid for backend writes. "
+                        f"Original error: {error_msg}"
+                    ) from e
+                
                 logger.warning(
-                    "Batch upsert failed (attempt %d/%d) for rows %d-%d: %s",
-                    attempt, MAX_RETRIES, i, i + len(batch) - 1, e
+                    "Batch upsert failed (attempt %d/%d) for rows %d-%d [%s]: %s",
+                    attempt, MAX_RETRIES, i, i + len(batch) - 1, error_type, error_msg
                 )
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_BACKOFF_SECONDS * attempt)

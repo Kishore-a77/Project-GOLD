@@ -2,13 +2,15 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
+.pytest_cache/
 
 # SQLite
 *.db
-database/
 
 # Logs
 darts_logs/
+*.log
 
 # Data
 data/
@@ -20,6 +22,7 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Model artifacts - ignore large checkpoint/training files
 *.ckpt
@@ -27,3 +30,4 @@ Thumbs.db
 *.pt
 *.h5
 *.tensorflowmodel
+models/**/*_next_*.csv

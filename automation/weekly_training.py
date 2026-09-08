@@ -6,6 +6,10 @@ Runs Sunday night: retrain NHITS, evaluate, and promote if better.
 import sys
 import os
 from datetime import datetime
+from pathlib import Path
+
+from darts import TimeSeries
+from darts.metrics import mape, mae, rmse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -51,7 +55,7 @@ def evaluate_model(model, ts, scaler):
 
 def get_model_artifacts_path():
     """Get the path where NHiTS model artifacts are stored."""
-    ROOT = Path(__file__).resolve().parents[2]
+    ROOT = Path(__file__).resolve().parents[1]
     return ROOT / "models" / "nhits_model"
 
 def is_better_model(new_metrics, current_metrics):
@@ -102,7 +106,7 @@ def main():
         
         print(f"[NHITS] train={len(train_ts)} val={len(val_ts)} test={len(test_ts)}")
         
-        model = train_nhits(ts)
+        model, _, _, _ = train_nhits(ts)
         
         # Step 5: Evaluate new model
         print("\n📈 STEP 5: Evaluating new model...")

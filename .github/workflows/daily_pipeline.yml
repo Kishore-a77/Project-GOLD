@@ -1,0 +1,65 @@
+name: Project GOLD Daily Pipeline
+
+on:
+  # 08:00 IST = 02:30 UTC.
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-gold-daily-pipeline
+  cancel-in-progress: false
+
+jobs:
+  daily-pipeline:
+    name: Run daily inference pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-pipeline.txt
+
+      - name: Cache Chronos pretrained weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-chronos-t5-small-${{ hashFiles('requirements-pipeline.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-chronos-t5-small-
+
+      - name: Validate runtime configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Project GOLD Daily Pipeline"
+          python --version
+          test -n "${SUPABASE_URL:-}" || { echo "Missing required secret: SUPABASE_URL" >&2; exit 1; }
+          test -n "${SUPABASE_KEY:-}" || { echo "Missing required secret: SUPABASE_KEY" >&2; exit 1; }
+          test -n "${SUPABASE_SERVICE_KEY:-}" || { echo "Missing required secret: SUPABASE_SERVICE_KEY" >&2; exit 1; }
+          test -f "models/nhits_model/nhits_model_vfinal" || {
+            echo "Missing active N-HiTS artifact: models/nhits_model/nhits_model_vfinal" >&2
+            exit 1
+          }
+          test -f "app/run_daily_pipeline.py"
+          test -f "requirements-pipeline.txt"
+
+      - name: Install pipeline dependencies
+        run: python -m pip install -r requirements-pipeline.txt
+
+      - name: Run Project GOLD daily pipeline
+        run: python -m app.run_daily_pipeline

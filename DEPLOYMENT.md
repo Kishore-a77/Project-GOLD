@@ -1,4 +1,7 @@
-# Streamlit Community Cloud Deployment Guide
+# Streamlit Community Cloud Deployment Guide (Future Phase)
+
+> This is a planning guide only. Cloud deployment and GitHub Actions are not
+> enabled as part of the current production-readiness phase.
 
 ## Overview
 
@@ -90,8 +93,8 @@ For Streamlit Community Cloud, add these in the app settings under **Secrets**.
 
 ## Python Version
 
-- **Required:** Python 3.10+
-- **Recommended:** Python 3.10 (matches GitHub Actions runner)
+- **Required:** Python 3.11+
+- **Recommended:** Python 3.11 (the project runtime)
 
 ## Main Application File
 
