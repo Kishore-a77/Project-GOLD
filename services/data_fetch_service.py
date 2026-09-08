@@ -68,6 +68,10 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
 
 
+class NoNewMarketData(RuntimeError):
+    """Yahoo responded successfully, but no completed candle was available."""
+
+
 def fetch_gold_data(period=None, start=None, end=None):
     """Fetch gold price data from Yahoo Finance.
 
@@ -89,7 +93,9 @@ def fetch_gold_data(period=None, start=None, end=None):
         df = ticker.history(period=period or "5y")
 
     if df is None or df.empty:
-        raise RuntimeError("Yahoo Finance returned no gold (GC=F) data.")
+        raise NoNewMarketData(
+            "Yahoo Finance returned no completed gold (GC=F) candle for the requested interval."
+        )
 
     df = df.reset_index()
     df['Date'] = pd.to_datetime(df['Date']).dt.date
@@ -268,13 +274,37 @@ def run_data_fetch():
         # "1mo" window, so this also works correctly when the DB is far behind
         # (e.g. after an interrupted backfill) instead of silently leaving a gap.
         start_date = latest_date + timedelta(days=1)
-        end_date = datetime.now().date() + timedelta(days=1)  # yfinance end is exclusive
+        # yfinance treats `end` as exclusive. At the scheduled 08:00 IST run,
+        # today's daily candle is normally incomplete, so use today as the
+        # exclusive boundary and request only completed prior sessions.
+        end_date = datetime.now().date()
         if start_date >= end_date:
-            logger.info("Already up to date (latest=%s); nothing to fetch.", latest_date)
+            logger.info(
+                "Already up to date (latest stored date=%s); no completed candle to fetch.",
+                latest_date
+            )
             return 0
         logger.info("Fetching incremental gold data from %s to %s...", start_date, end_date)
-        df = fetch_gold_data(start=start_date, end=end_date)
+        try:
+            df = fetch_gold_data(start=start_date, end=end_date)
+        except NoNewMarketData as exc:
+            if (end_date - start_date).days > 7:
+                raise RuntimeError(
+                    "Yahoo returned no data for a stale incremental interval; "
+                    "this is not treated as an expected market-closure condition."
+                ) from exc
+            logger.info(
+                "No new completed gold daily candle available yet. "
+                "Continuing with latest available actual data (latest stored date=%s): %s",
+                latest_date, exc
+            )
+            return 0
         df = df[df['date'] >= start_date]
+        logger.info(
+            "Latest available Yahoo gold date=%s; new rows received=%d",
+            df['date'].max() if not df.empty else None,
+            len(df)
+        )
     else:
         # First run - fetch full history
         logger.info("No existing data found. Fetching full gold history...")

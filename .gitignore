@@ -31,3 +31,7 @@ desktop.ini
 *.h5
 *.tensorflowmodel
 models/**/*_next_*.csv
+
+# Chronos source checkout is not required; requirements-pipeline.txt installs
+# the published Python package. Keep any local source checkout out of Git.
+chronos-forecasting/
