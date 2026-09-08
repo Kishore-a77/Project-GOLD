@@ -26,6 +26,71 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # A GitHub "Re-run jobs" can reuse the original event SHA. The
+          # inference job must use the currently deployed artifact on main.
+          ref: main
+          fetch-depth: 0
+
+      - name: Preflight N-HiTS repository artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "N-HiTS artifact preflight"
+          echo "branch: $(git branch --show-current)"
+          echo "HEAD: $(git rev-parse HEAD)"
+          git log -1 --oneline
+          echo "Tracked N-HiTS files:"
+          git ls-files models/nhits_model
+
+          wrapper="models/nhits_model/nhits_model_vfinal"
+          checkpoint="models/nhits_model/nhits_model_vfinal.ckpt"
+
+          test -f "$wrapper" || { echo "ERROR: missing N-HiTS wrapper: $wrapper" >&2; exit 1; }
+          test -f "$checkpoint" || { echo "ERROR: missing N-HiTS checkpoint: $checkpoint" >&2; exit 1; }
+          test -s "$wrapper" || { echo "ERROR: empty N-HiTS wrapper: $wrapper" >&2; exit 1; }
+          test -s "$checkpoint" || { echo "ERROR: empty N-HiTS checkpoint: $checkpoint" >&2; exit 1; }
+
+          checkpoint_size=$(stat -c%s "$checkpoint")
+          wrapper_size=$(stat -c%s "$wrapper")
+          echo "wrapper_size: $wrapper_size bytes"
+          echo "checkpoint_size: $checkpoint_size bytes"
+          test "$checkpoint_size" -ge 5242880 || {
+            echo "ERROR: N-HiTS checkpoint is unexpectedly small: $checkpoint_size bytes" >&2
+            exit 1
+          }
+
+          git ls-files --error-unmatch "$checkpoint" >/dev/null || {
+            echo "ERROR: N-HiTS checkpoint is not tracked by the Git index" >&2
+            exit 1
+          }
+          git cat-file -e "HEAD:$checkpoint" || {
+            echo "ERROR: N-HiTS checkpoint is absent from HEAD" >&2
+            exit 1
+          }
+
+          file_blob=$(git hash-object "$checkpoint")
+          git_blob=$(git rev-parse "HEAD:$checkpoint")
+          echo "wrapper_sha256: $(sha256sum "$wrapper" | awk '{print $1}')"
+          echo "checkpoint_sha256: $(sha256sum "$checkpoint" | awk '{print $1}')"
+          echo "checkpoint_file_blob: $file_blob"
+          echo "checkpoint_git_blob: $git_blob"
+          test "$file_blob" = "$git_blob" || {
+            echo "ERROR: checked-out checkpoint differs from the Git object in HEAD" >&2
+            exit 1
+          }
+
+      - name: Validate checked-out N-HiTS files without Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper="models/nhits_model/nhits_model_vfinal"
+          checkpoint="models/nhits_model/nhits_model_vfinal.ckpt"
+          git ls-files --error-unmatch "$checkpoint" >/dev/null || exit 1
+          git cat-file -e "HEAD:$checkpoint"
+          test -s "$wrapper"
+          test -s "$checkpoint"
+          echo "N-HiTS wrapper and fitted checkpoint are tracked and present."
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -60,6 +125,45 @@ jobs:
 
       - name: Install pipeline dependencies
         run: python -m pip install -r requirements-pipeline.txt
+
+      - name: Validate fitted N-HiTS load and inference
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u - <<'PY'
+          from pathlib import Path
+
+          import numpy as np
+          import torch
+          import pytorch_lightning as pl
+          import darts
+          from darts.models import NHiTSModel
+
+          wrapper = Path("models/nhits_model/nhits_model_vfinal").resolve()
+          checkpoint = wrapper.with_name(wrapper.name + ".ckpt")
+          assert wrapper.is_file() and wrapper.stat().st_size > 0
+          assert checkpoint.is_file() and checkpoint.stat().st_size > 0
+          assert darts.__version__ == "0.39.0", darts.__version__
+          assert torch.__version__.split("+")[0] == "2.9.1", torch.__version__
+          assert pl.__version__ == "2.5.2", pl.__version__
+
+          model = NHiTSModel.load(str(wrapper), map_location="cpu")
+          assert model._fit_called is True, "N-HiTS loaded without fitted state"
+          assert model.model is not None, "N-HiTS LightningModule weights are missing"
+
+          # The persisted wrapper contains the actual training series. This
+          # validates the fitted checkpoint without training or using fallback data.
+          context = getattr(model, "training_series", None)
+          assert context is not None, "Persisted N-HiTS context series is missing"
+          forecast = model.predict(n=5, series=context)
+          values = forecast.all_values()
+          assert len(forecast) == 5
+          assert np.isfinite(values).all(), "N-HiTS forecast contains non-finite values"
+
+          print(f"Darts {darts.__version__}, torch {torch.__version__}, Lightning {pl.__version__}")
+          print(f"N-HiTS fitted: _fit_called={model._fit_called}, model_state=present")
+          print(f"N-HiTS validation forecast values: {len(forecast)} finite points")
+          PY
 
       - name: Run Project GOLD daily pipeline
         run: python -m app.run_daily_pipeline
