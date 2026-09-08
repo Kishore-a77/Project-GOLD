@@ -87,10 +87,26 @@ def fetch_gold_data(period=None, start=None, end=None):
     """
     ticker = yf.Ticker("GC=F")  # Gold Futures
 
+    history_kwargs = {"period": period or "5y"}
     if start is not None:
-        df = ticker.history(start=str(start), end=str(end) if end else None)
-    else:
-        df = ticker.history(period=period or "5y")
+        history_kwargs = {"start": str(start), "end": str(end) if end else None}
+
+    df = None
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            df = ticker.history(**history_kwargs)
+            break
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Yahoo GC=F request failed (attempt %d/%d): %s",
+                attempt, MAX_RETRIES, exc
+            )
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+    if df is None and last_error is not None:
+        raise RuntimeError("Yahoo Finance GC=F request failed after bounded retries") from last_error
 
     if df is None or df.empty:
         raise NoNewMarketData(
@@ -98,8 +114,14 @@ def fetch_gold_data(period=None, start=None, end=None):
         )
 
     df = df.reset_index()
+    if "Date" not in df.columns:
+        raise RuntimeError("Yahoo Finance returned an invalid GC=F response without a Date column.")
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     df.columns = [c.lower().replace(' ', '_') for c in df.columns]
+    required_columns = {'date', 'open', 'high', 'low', 'close', 'volume'}
+    if not required_columns.issubset(df.columns):
+        missing = sorted(required_columns - set(df.columns))
+        raise RuntimeError(f"Yahoo Finance returned an invalid GC=F response; missing columns: {missing}")
     return df[['date', 'open', 'high', 'low', 'close', 'volume']]
 
 
@@ -273,22 +295,22 @@ def run_data_fetch():
         # Fetch from latest date onwards — an explicit date range, not a fixed
         # "1mo" window, so this also works correctly when the DB is far behind
         # (e.g. after an interrupted backfill) instead of silently leaving a gap.
-        start_date = latest_date + timedelta(days=1)
+        current_date = datetime.now().date()
+        request_start = latest_date - timedelta(days=2)
+        request_end = current_date + timedelta(days=1)
+        logger.info("Latest stored gold date: %s", latest_date)
+        logger.info("Current date/time: %s", datetime.now().isoformat())
+        logger.info(
+            "Requesting Yahoo historical window: %s -> %s",
+            request_start, request_end
+        )
         # yfinance treats `end` as exclusive. At the scheduled 08:00 IST run,
         # today's daily candle is normally incomplete, so use today as the
         # exclusive boundary and request only completed prior sessions.
-        end_date = datetime.now().date()
-        if start_date >= end_date:
-            logger.info(
-                "Already up to date (latest stored date=%s); no completed candle to fetch.",
-                latest_date
-            )
-            return 0
-        logger.info("Fetching incremental gold data from %s to %s...", start_date, end_date)
         try:
-            df = fetch_gold_data(start=start_date, end=end_date)
+            df = fetch_gold_data(start=request_start, end=request_end)
         except NoNewMarketData as exc:
-            if (end_date - start_date).days > 7:
+            if (request_end - request_start).days > 7:
                 raise RuntimeError(
                     "Yahoo returned no data for a stale incremental interval; "
                     "this is not treated as an expected market-closure condition."
@@ -299,12 +321,19 @@ def run_data_fetch():
                 latest_date, exc
             )
             return 0
-        df = df[df['date'] >= start_date]
+        latest_yahoo_date = df['date'].max() if not df.empty else None
+        df = df[df['date'] > latest_date]
         logger.info(
             "Latest available Yahoo gold date=%s; new rows received=%d",
-            df['date'].max() if not df.empty else None,
+            latest_yahoo_date,
             len(df)
         )
+        if df.empty:
+            logger.info(
+                "Market data status: NO_NEW_DATA. "
+                "No new completed GC=F daily candle is currently available."
+            )
+            return 0
     else:
         # First run - fetch full history
         logger.info("No existing data found. Fetching full gold history...")
