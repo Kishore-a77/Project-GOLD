@@ -148,11 +148,73 @@ def train_nhits(ts: TimeSeries):
 
     model.fit(train_ts, val_series=val_ts)
 
+    if not _is_fitted_nhits_model(model):
+        raise RuntimeError(
+            "N-HiTS fit completed without producing fitted model state; "
+            "refusing to persist an unusable artifact."
+        )
+
     save_path = str(MODEL_DIR / "nhits_model_vfinal")
     model.save(save_path)
     print("[NHITS] Saved:", save_path)
 
     return model, train_ts, val_ts, test_ts
+
+
+def _is_fitted_nhits_model(model) -> bool:
+    """Return whether a loaded/trained Darts N-HiTS object has usable state."""
+
+    return (
+        isinstance(model, NHiTSModel)
+        and bool(getattr(model, "_fit_called", False))
+        and getattr(model, "model", None) is not None
+    )
+
+
+def load_nhits_model(model_path=None) -> NHiTSModel:
+    """Load and validate the persisted N-HiTS model used by the pipeline.
+
+    Darts global models need the target ``TimeSeries`` at prediction time when
+    they were trained from a series sequence.  This helper deliberately only
+    loads the persisted model; ``predict_nhits()` supplies the current series.
+    """
+
+    path = Path(model_path or (MODEL_DIR / "nhits_model_vfinal")).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"NHITS model artifact not found at {path}. "
+            "Run the offline N-HiTS training job first."
+        )
+
+    try:
+        model = NHiTSModel.load(str(path))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to deserialize N-HiTS artifact at {path}. "
+            "The artifact must be saved and loaded with a compatible Darts "
+            "runtime (the pipeline pins its Darts version)."
+        ) from exc
+
+    if not isinstance(model, NHiTSModel):
+        raise TypeError(
+            f"Unexpected object in N-HiTS artifact {path}: "
+            f"{type(model).__module__}.{type(model).__name__}"
+        )
+
+    if not _is_fitted_nhits_model(model):
+        raise RuntimeError(
+            f"N-HiTS artifact at {path} loaded without fitted model state "
+            f"(_fit_called={getattr(model, '_fit_called', None)}, "
+            f"model_state={'present' if getattr(model, 'model', None) is not None else 'missing'}). "
+            "Regenerate the offline artifact with the same Darts version as "
+            "the pipeline; do not run daily inference with an unfitted model."
+        )
+
+    print(
+        f"[NHITS] Loaded fitted artifact: {path} "
+        f"(bytes={path.stat().st_size}, _fit_called={model._fit_called})"
+    )
+    return model
 
 
 # ---------------------------------------------------------
@@ -241,14 +303,7 @@ def inference_only(horizon_days=365):
 
     ts, scaler = prepare_series(df)
 
-    model_path = MODEL_DIR / "nhits_model_vfinal"
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"NHITS model not found at {model_path}. "
-            "Run main_train_and_predict() once."
-        )
-
-    model = NHiTSModel.load(str(model_path))
+    model = load_nhits_model()
     return predict_nhits(model, ts, scaler, horizon_days)
 
 
