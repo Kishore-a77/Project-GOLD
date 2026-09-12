@@ -42,16 +42,16 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          python -c "
-import os
-import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parents[2]
-if ROOT not in sys.path:
-    sys.path.insert(0, str(ROOT))
-from app.db import supabase_client
-supabase_client.ensure_schema()
-          "
+          python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          ROOT = Path.cwd()
+          if str(ROOT) not in sys.path:
+              sys.path.insert(0, str(ROOT))
+          from app.db import supabase_client
+          supabase_client.ensure_schema()
+          PY
       
       - name: Weekly model retraining
         env:

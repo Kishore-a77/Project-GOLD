@@ -5,7 +5,7 @@ and idempotent persistence to the Supabase `predictions` table.
 This module reuses the existing model implementations:
   * Chronos forecasting : app.models.chronos_t5_model.ChronosT5Model
   * N-HiTS forecasting  : app.models.day10_nhits.inference_only (INFERENCE ONLY, no training)
-  * Ensemble combination: app.models.ensemble_model.combine + ensemble_model.WEIGHTS
+  * Ensemble combination: services.ensemble_logic.combine + ensemble_logic.WEIGHTS
 
 It does NOT retrain models and does NOT duplicate model/ensemble logic.
 """
@@ -157,7 +157,7 @@ def run_nhits_prediction(horizon_days=30):
 
 
 # -------------------------------------------------
-# ENSEMBLE (reuses app.models.ensemble_model.combine + WEIGHTS)
+# ENSEMBLE (reuses services.ensemble_logic.combine + WEIGHTS)
 # -------------------------------------------------
 def compute_ensemble(chronos_30, nhits_30):
     # Lightweight import (no torch/darts/psycopg2) so this module stays testable.

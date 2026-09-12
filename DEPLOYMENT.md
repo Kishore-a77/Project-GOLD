@@ -119,7 +119,13 @@ requests>=2.31.0
 
 ## Local Development
 
-To run the dashboard locally:
+For a zero-manual-command Windows launch, set `PROJECT_GOLD_PYTHON` to an
+external Python executable if needed, then double-click `start_project_gold.bat`
+(or run `start_project_gold.ps1`). The launcher starts Streamlit on port 8501,
+waits for the HTTP endpoint, and opens the browser automatically. It does not
+create a virtual environment inside the repository.
+
+The equivalent manual command is:
 
 ```bash
 # Install dashboard dependencies
@@ -133,10 +139,9 @@ export SUPABASE_KEY="your-anon-key"
 streamlit run streamlit_app.py
 ```
 
-Or with the direct file:
-```bash
-streamlit run app/views/dashboard.py
-```
+The dashboard does not start a local Python process when a deployed URL is
+opened. Streamlit Community Cloud starts `streamlit_app.py`; it reads the
+dashboard dependencies from `requirements.txt` and uses configured secrets.
 
 ## Troubleshooting
 

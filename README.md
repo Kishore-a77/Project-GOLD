@@ -22,7 +22,7 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 │                    DATA PIPELINE                            │
 │  ┌───────────┐    ┌───────────┐    ┌──────────────────┐   │
 │  │ Yahoo     │    │ Feature   │    │ Supabase         │   │
-│  │ Finance   │───▶│ Engineering│───▶│ (gold_data.db)  │   │
+│  │ Finance   │───▶│ Engineering│───▶│ Supabase         │   │
 │  │ API       │    │ Pipeline  │    │                  │   │
 │  └───────────┘    └───────────┘    └──────────────────┘   │
 │                                                             │
@@ -73,8 +73,8 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 ## Production Deployment Architecture
 
 ```text
-Local development:  daily pipeline → Supabase → Streamlit dashboard
-Future production:  scheduled pipeline → Supabase → deployed Streamlit dashboard
+Local development:  launcher → Streamlit dashboard → Supabase
+Production:         GitHub Actions → Supabase → deployed Streamlit dashboard
 ```
 
 Pipeline entry point:
@@ -86,22 +86,23 @@ python -m app.run_daily_pipeline
 Dashboard entry point:
 
 ```bash
-streamlit run app/views/dashboard.py
+streamlit run streamlit_app.py
 ```
 
 The pipeline writes gold data, features, predictions, and pipeline-run status
 to Supabase. The dashboard is a read-only consumer of Supabase. Local `.env`
 loading is supported for development; cloud deployments should provide the
 same variables through environment configuration or a secret manager.
+For Windows local development, `start_project_gold.ps1` starts Streamlit and
+opens the browser automatically using an external Python runtime.
 
 The daily pipeline loads the promoted N-HiTS artifact for inference; it does
 not retrain the model. The separate weekly training entry point retrains,
 evaluates, and records promoted model metadata.
 
 The canonical production pipeline command is `python -m app.run_daily_pipeline`.
-The root `run_daily_pipeline.py` and scripts under `automation/` and
-`data_pipeline/` are retained for compatibility or training workflows, but
-are not additional daily production entry points.
+The weekly training workflow uses `automation/weekly_training.py`; daily
+inference remains separate and does not retrain models.
 
 Before cloud deployment, model-artifact distribution and the heavy CPU
 dependency set must be resolved. N-HiTS artifacts currently live under
@@ -169,9 +170,8 @@ python -m app.run_daily_pipeline
 streamlit run app/views/dashboard.py
 ```
 
-> The legacy SQLite/Snowflake files shown in older examples are retained for
-> compatibility and research only. They are not part of the active daily
-> pipeline. Supabase is the operational database.
+> Supabase is the operational database. The repository no longer includes the
+> retired SQLite/Snowflake implementations.
 
 ## 📈 Using the Dashboard
 
@@ -200,25 +200,21 @@ streamlit run app/views/dashboard.py
 ```
 project-gold/
 ├── app/
-│   ├── views/
-│   │   └── dashboard.py          # Main Streamlit dashboard
-│   ├── models/
-│   │   ├── chronos_t5_model.py   # Chronos-T5 implementation
-│   │   ├── chronos_bolt_model.py # Chronos-Bolt alternative
-│   │   ├── day10_nhits.py        # N-HiTS model training & inference
-│   │   └── ensemble_model.py     # Ensemble combination logic
-│   └── viewmodels/
-│       ├── prediction_service.py  # Prediction orchestration
-│       └── sqlite_data_loader.py # SQLite data access
-├── database/
-│   └── gold_data.db              # SQLite database
-├── models/
-│   ├── nhits_model/              # Trained N-HiTS models
-│   └── ensemble/                 # Ensemble outputs
-├── scripts/
-│   ├── ingest_gold_history_sqlite.py
-│   └── build_features_sqlite.py
+│   ├── views/dashboard.py        # Streamlit dashboard
+│   ├── services/                 # Dashboard database and refresh services
+│   └── models/
+│       ├── chronos_t5_model.py   # Chronos-T5 implementation
+│       └── day10_nhits.py        # N-HiTS model training and inference
+├── services/                     # Ingestion, features, predictions, ensemble
+├── automation/weekly_training.py # Offline model training workflow
+├── models/nhits_model/            # Tracked fitted N-HiTS artifacts
+│   ├── nhits_model_vfinal
+│   └── nhits_model_vfinal.ckpt
+├── database/supabase_schema.sql  # Supabase schema
+├── run_daily_pipeline.py
+├── streamlit_app.py
 ├── requirements.txt
+├── requirements-pipeline.txt
 ├── README.md
 └── .gitignore
 ```
@@ -228,7 +224,7 @@ project-gold/
 ### Windows (Task Scheduler)
 ```powershell
 # Create daily prediction task
-schtasks /create /tn "ProjectGOLD_Daily" /tr "python C:\path\to\ensemble_model.py" /sc daily /st 09:00
+schtasks /create /tn "ProjectGOLD_Daily" /tr "python -m app.run_daily_pipeline" /sc daily /st 09:00
 ```
 
 ### Linux/Mac (Cron)
@@ -237,23 +233,22 @@ schtasks /create /tn "ProjectGOLD_Daily" /tr "python C:\path\to\ensemble_model.p
 crontab -e
 
 # Add line for daily 9 AM predictions
-0 9 * * * cd /path/to/project-gold && python app/models/ensemble_model.py
+0 9 * * * cd /path/to/project-gold && python -m app.run_daily_pipeline
 ```
 
 ### Manual Run
 ```bash
 # Generate today's predictions
-python app/models/ensemble_model.py
+python -m app.run_daily_pipeline
 ```
 
 ## 📊 Output Files
 
 | File | Description | Location |
 |------|-------------|----------|
-| `ensemble_next_30.csv` | 30-day ensemble predictions | `models/ensemble/` |
-| `nhits_next_30.csv` | N-HiTS standalone predictions | `models/nhits_model/` |
+| Predictions | Ensemble and model forecasts | Supabase `predictions` table |
 | `gold_forecast_[weight]g.csv` | User-downloadable forecasts | Dashboard export |
-| `gold_data.db` | Complete historical + predictions | `database/` |
+| Pipeline status | Daily execution status | Supabase `pipeline_runs` table |
 
 ## 🎯 Use Cases
 

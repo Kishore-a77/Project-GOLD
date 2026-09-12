@@ -1,7 +1,7 @@
 """
 Lightweight ensemble logic for the prediction pipeline.
 
-Kept separate from app.models.ensemble_model (the legacy SQLite version) so the
+Kept as the active ensemble implementation so the
 daily pipeline can combine forecasts WITHOUT importing torch / darts / psycopg2.
 Only numpy and pandas are required.
 """

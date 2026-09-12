@@ -10,5 +10,8 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Import and run the dashboard
-import app.views.dashboard
+# Import definitions without executing live database access, then render inside
+# Streamlit's script runtime.
+from app.views.dashboard import render_dashboard
+
+render_dashboard()
