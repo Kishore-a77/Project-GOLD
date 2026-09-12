@@ -50,6 +50,7 @@ log = logging.getLogger("daily_pipeline")
 # imports of services
 from app.db import supabase_client
 from services import data_fetch_service, feature_service, prediction_service
+from services.notifications import notify_pipeline_failure, notify_pipeline_success
 
 
 class PipelineError(RuntimeError):
@@ -156,6 +157,10 @@ def main():
                 # Success path: do not fail the run just because status logging failed,
                 # but make it very visible in the logs.
                 log.error("STAGE 9: Failed to record SUCCESS status: %s", _sanitize(str(e)))
+            notify_pipeline_success(
+                records_processed=metrics["records_processed"],
+                predictions_generated=predictions_generated,
+            )
 
         log.info("=" * 70)
         log.info("PIPELINE COMPLETE ✅")
@@ -168,6 +173,7 @@ def main():
         log.error("Reason: %s", _sanitize(str(pe)))
         log.error(traceback.format_exc())
         _record_failure(started, pe, metrics)
+        notify_pipeline_failure(pe.stage, _sanitize(str(pe)))
         return 1
     except Exception as e:
         log.error("=" * 70)
@@ -175,6 +181,7 @@ def main():
         log.error("Reason: %s", _sanitize(str(e)))
         log.error(traceback.format_exc())
         _record_failure(started, e, metrics)
+        notify_pipeline_failure("unknown", _sanitize(str(e)))
         return 1
 
 

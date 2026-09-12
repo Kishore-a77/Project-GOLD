@@ -424,7 +424,10 @@ def test_workflow_fails_loudly_on_dependency_failure():
     # Uses the dedicated pipeline requirements (keeps dashboard deploy light).
     assert "requirements-pipeline.txt" in content
     # Actually invokes the pipeline entry point (returns non-zero on failure).
-    assert "python run_daily_pipeline.py" in content
+    assert (
+        "python run_daily_pipeline.py" in content
+        or "python -m app.run_daily_pipeline" in content
+    )
     # Must NOT swallow failures.
     assert "continue-on-error" not in content
     assert "|| true" not in content

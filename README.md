@@ -60,15 +60,12 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 | **Production Cost** | High compute | **Low cost** (Supabase + scheduling) |
 | **Update Frequency** | Manual retraining | **Fully automated daily** |
 
-## 📊 Performance Metrics
+## Accuracy Monitoring
 
-| Model | MAE (USD/oz) | RMSE (USD/oz) | MAPE (%) |
-|-------|--------------|---------------|----------|
-| Chronos-T5 Only | 315.42 | 345.67 | 8.2% |
-| N-HiTS Only | 298.76 | 325.43 | 7.8% |
-| **Ensemble (Project GOLD)** | **276.54** | **302.89** | **7.1%** |
-
-*Tested on 2023-2024 out-of-sample data*
+`services/accuracy_service.py` calculates MAE, RMSE, and MAPE only after a
+target date has an observed actual price. The project does not claim future
+accuracy or fabricate historical metrics. Chronos-T5, N-HiTS, and Ensemble
+outputs remain separately measurable for later comparison.
 
 ## Production Deployment Architecture
 
@@ -104,9 +101,9 @@ The canonical production pipeline command is `python -m app.run_daily_pipeline`.
 The weekly training workflow uses `automation/weekly_training.py`; daily
 inference remains separate and does not retrain models.
 
-Before cloud deployment, model-artifact distribution and the heavy CPU
-dependency set must be resolved. N-HiTS artifacts currently live under
-`models/nhits_model/`, while Chronos downloads pretrained weights at runtime.
+The pipeline dependency file pins CPU-only PyTorch wheels for the CPU GitHub
+Actions runner. N-HiTS artifacts live under `models/nhits_model/`, while
+Chronos downloads pretrained weights at runtime.
 
 ## Automated Daily Pipeline
 
@@ -132,7 +129,8 @@ provisioned; it is only needed for schema bootstrap or maintenance tasks.
 
 View execution output under GitHub → Actions → Project GOLD Daily Pipeline.
 The workflow prevents overlapping scheduled and manual runs. Streamlit
-dashboard deployment remains a future phase and is not configured here.
+deployment uses `streamlit_app.py` and remains a read-only consumer of
+Supabase.
 
 ## 🚀 Quick Start
 
@@ -147,13 +145,13 @@ dashboard deployment remains a future phase and is not configured here.
 git clone https://github.com/yourusername/project-gold.git
 cd project-gold
 
-# Create virtual environment
-python -m venv venv
+# Create a virtual environment outside the repository
+python -m venv ../project-gold-dashboard-venv
 
 # Activate (Windows)
-venv\Scripts\activate
+..\project-gold-dashboard-venv\Scripts\activate
 # Activate (Mac/Linux)
-source venv/bin/activate
+source ../project-gold-dashboard-venv/bin/activate
 
 # Install dashboard dependencies locally
 pip install -r requirements.txt
@@ -167,8 +165,47 @@ python -m app.run_daily_pipeline
 
 ### Launch Dashboard
 ```bash
-streamlit run app/views/dashboard.py
+streamlit run streamlit_app.py
 ```
+
+For Windows, double-click `start_project_gold.bat` to start Streamlit and open
+the browser automatically. It uses an external Python runtime and does not
+run the forecasting pipeline.
+
+## Automatic Refresh States
+
+The dashboard evaluates Supabase on each session initialization:
+
+- `READY`: current actuals and complete persisted forecasts are available.
+- `STALE`: predictions exist but do not cover the latest actual date.
+- `MISSING`: no valid forecast exists for the latest actual date.
+- `PIPELINE_RUNNING`: an active local/Supabase/GitHub run is detected.
+- `NETWORK_ERROR`: Supabase cannot be reached; no empty data is substituted.
+- `CONFIG_ERROR`: required credentials are missing or invalid.
+
+For stale or missing data, the dashboard can dispatch `daily_pipeline.yml`
+when `GITHUB_TOKEN` is configured. Local pipeline execution is opt-in through
+`GOLD_ALLOW_LOCAL_PIPELINE_REFRESH=1`.
+
+## Required Secrets
+
+Use variable names only; never commit their values:
+
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+- `SUPABASE_SERVICE_KEY` (pipeline writes)
+- `GITHUB_TOKEN` (optional dashboard workflow dispatch)
+- `GITHUB_REPOSITORY` (optional; defaults to the project repository)
+- `DATABASE_URL` (optional schema bootstrap/weekly maintenance)
+
+## Troubleshooting
+
+- `NO_NEW_DATA` is valid when Yahoo Finance has no new completed candle.
+- A missing N-HiTS checkpoint indicates an incomplete checkout; verify both files under `models/nhits_model/`.
+- N-HiTS load failures require the pinned Darts/PyTorch runtime and adjacent `.ckpt` file.
+- GitHub dispatch failures require a token with workflow-dispatch permission.
+- Supabase failures are shown as `NETWORK_ERROR`, not as an empty dataset.
+- CPU dependency installation uses the PyTorch CPU index; workflow logs verify CUDA is unavailable.
 
 > Supabase is the operational database. The repository no longer includes the
 > retired SQLite/Snowflake implementations.
@@ -206,6 +243,9 @@ project-gold/
 │       ├── chronos_t5_model.py   # Chronos-T5 implementation
 │       └── day10_nhits.py        # N-HiTS model training and inference
 ├── services/                     # Ingestion, features, predictions, ensemble
+│   ├── accuracy_service.py       # Completed-target MAE/RMSE/MAPE evaluation
+│   ├── notifications.py          # Safe extensible pipeline alert hooks
+│   └── ...
 ├── automation/weekly_training.py # Offline model training workflow
 ├── models/nhits_model/            # Tracked fitted N-HiTS artifacts
 │   ├── nhits_model_vfinal
@@ -218,6 +258,13 @@ project-gold/
 ├── README.md
 └── .gitignore
 ```
+
+## Pipeline Alerts
+
+`services/notifications.py` provides `notify_pipeline_success()` and
+`notify_pipeline_failure()` hooks. The default implementation logs events only;
+it sends no external notifications. A future provider can be connected without
+changing pipeline control flow.
 
 ## 🔄 Automation Setup
 

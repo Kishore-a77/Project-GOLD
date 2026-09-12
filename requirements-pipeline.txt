@@ -9,10 +9,12 @@ pandas==2.3.3
 yfinance==1.0
 scikit-learn==1.8.0
 
-# Deep Learning
-torch==2.9.1
-torchvision==0.24.1
-torchaudio==2.9.1
+# Deep Learning (CPU-only GitHub Actions runtime)
+# The explicit CPU wheel prevents pip from selecting the much larger CUDA
+# distribution. Chronos and Darts/N-HiTS use torch directly; torchvision and
+# torchaudio are not imported by this project and are intentionally omitted.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.9.1+cpu
 
 # Time Series Forecasting
 u8darts[torch]==0.39.0

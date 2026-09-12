@@ -157,7 +157,8 @@ def main():
         else:
             print("\n❌ STEP 6: New model is not better than current model. Keeping current model.")
             print(f"   New model MAE: {new_metrics['mae']:.4f}")
-            print(f"   Current model MAE: {current_metrics['mae']:.4f if current_metrics else 'N/A'}")
+            current_mae = f"{current_metrics['mae']:.4f}" if current_metrics else "N/A"
+            print(f"   Current model MAE: {current_mae}")
             
         print("=" * 60)
         

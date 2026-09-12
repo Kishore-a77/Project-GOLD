@@ -29,6 +29,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-pipeline.txt
+
+      - name: Verify CPU-only model runtime
+        run: |
+          python - <<'PY'
+          import torch
+          print(f"torch={torch.__version__}")
+          print(f"cuda_available={torch.cuda.is_available()}")
+          assert not torch.cuda.is_available(), "CPU-only runner unexpectedly exposes CUDA"
+          PY
       
       - name: Cache Hugging Face models
         uses: actions/cache@v4

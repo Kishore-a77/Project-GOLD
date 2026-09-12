@@ -1,7 +1,7 @@
-# Streamlit Community Cloud Deployment Guide (Future Phase)
+# Project-GOLD Streamlit Deployment Guide
 
-> This is a planning guide only. Cloud deployment and GitHub Actions are not
-> enabled as part of the current production-readiness phase.
+The dashboard is a read-only prediction consumer. GitHub Actions is the
+authoritative execution environment for ingestion, forecasting, and writes.
 
 ## Overview
 
@@ -52,7 +52,7 @@ Required tables:
 2. Click **"New app"**
 3. Select your GitHub repository and branch
 4. Set **Main file path** to: `streamlit_app.py`
-5. Set **Python version** to: `3.10` (or higher)
+5. Set **Python version** to: `3.11`
 6. Click **"Deploy"**
 
 ### 4. Configure Secrets
@@ -63,6 +63,8 @@ In the Streamlit Community Cloud app settings, add the following secrets:
 |-------------|-------------|----------|
 | `SUPABASE_URL` | Your Supabase project URL (e.g., `https://xxx.supabase.co`) | Yes |
 | `SUPABASE_KEY` | Your Supabase anon/public key | Yes |
+| `GITHUB_TOKEN` | Token allowed to dispatch the daily workflow | For automatic refresh |
+| `GITHUB_REPOSITORY` | Repository in `owner/name` form | Optional |
 
 **How to get these values:**
 1. Go to your Supabase project dashboard
@@ -86,7 +88,7 @@ After deployment:
 ```toml
 # .streamlit/secrets.toml (for local development)
 SUPABASE_URL = "https://your-project.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+SUPABASE_KEY = "your-anon-key"
 ```
 
 For Streamlit Community Cloud, add these in the app settings under **Secrets**.
@@ -99,23 +101,12 @@ For Streamlit Community Cloud, add these in the app settings under **Secrets**.
 ## Main Application File
 
 - **File:** `streamlit_app.py`
-- **Alternative:** `app/views/dashboard.py` (if configuring custom main file in Streamlit Cloud)
 
 ## Requirements
 
-The `requirements.txt` file contains only the dashboard dependencies:
-
-```
-streamlit>=1.24.0
-pandas>=2.0.0
-numpy>=1.24.0
-plotly>=5.15.0
-supabase>=2.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-```
-
-**Note:** Training/model dependencies (torch, darts, chronos, etc.) are in `requirements-pipeline.txt` and are **not** installed by Streamlit Cloud. This keeps the deployment lightweight and fast.
+The dashboard dependencies are pinned in `requirements.txt`. Do not install
+`requirements-pipeline.txt` in Streamlit Cloud; it contains CPU forecasting
+dependencies intended for GitHub Actions.
 
 ## Local Development
 

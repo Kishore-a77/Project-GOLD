@@ -126,6 +126,17 @@ jobs:
       - name: Install pipeline dependencies
         run: python -m pip install -r requirements-pipeline.txt
 
+      - name: Verify CPU-only model runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u - <<'PY'
+          import torch
+          print(f"torch={torch.__version__}")
+          print(f"cuda_available={torch.cuda.is_available()}")
+          assert not torch.cuda.is_available(), "CPU-only runner unexpectedly exposes CUDA"
+          PY
+
       - name: Validate fitted N-HiTS load and inference
         shell: bash
         run: |

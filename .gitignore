@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+project-gold-validation/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
