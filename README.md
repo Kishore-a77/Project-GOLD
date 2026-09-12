@@ -11,7 +11,7 @@ Project GOLD is a production-grade time-series prediction system designed to hel
 - **🤖 Ensemble AI Models**: Combines Chronos-T5 (foundation model) + N-HiTS (deep hierarchical model)
 - **💰 Low Operational Cost**: Supabase-backed pipeline with automated scheduling
 - **📊 Interactive Dashboard**: Streamlit interface with weight customization
-- **🔄 Automated Updates**: Daily predictions via OS scheduling
+- **🔄 Automated Updates**: GitHub Actions performs the scheduled daily pipeline execution
 - **📈 Investor-Focused**: Custom weight calculations (grams to price conversion)
 - **📁 Data Export**: CSV downloads with comprehensive forecast data
 
@@ -266,7 +266,10 @@ project-gold/
 it sends no external notifications. A future provider can be connected without
 changing pipeline control flow.
 
-## 🔄 Automation Setup
+## 🔄 Local Development Automation
+
+The following scheduler examples are for local development only. Production
+daily execution is performed by GitHub Actions.
 
 ### Windows (Task Scheduler)
 ```powershell
